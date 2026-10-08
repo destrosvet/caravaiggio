@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Caravaiggio app icon">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17120f"/>
+      <stop offset="1" stop-color="#34251d"/>
+    </linearGradient>
+    <linearGradient id="stroke" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f0c36a"/>
+      <stop offset="1" stop-color="#c56a3d"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#background)"/>
+  <path d="M355 154c-27-31-62-47-104-47-82 0-145 64-145 149s63 149 145 149c42 0 78-16 105-48l-42-41c-17 19-37 29-62 29-46 0-80-38-80-89s34-89 80-89c24 0 45 10 61 28z" fill="#f7efe2"/>
+  <path d="M355 154 401 96l15 15-58 46zm3 203 58 44-15 15-46-59z" fill="url(#stroke)"/>
+  <circle cx="392" cy="256" r="24" fill="url(#stroke)"/>
+</svg>
