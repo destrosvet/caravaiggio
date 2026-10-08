@@ -1,3 +1,6 @@
+import { contourDirectionField, imageContourStrokes } from "./imageContours.ts";
+import { brushScaleMap } from "./brushScaleMap.ts";
+import { joinNearbyStrokes } from "./strokeJoining.ts";
 import type { PaintingPlan, Stroke } from "./model.ts";
 
 export type BrushProfile = Readonly<{
@@ -20,7 +23,11 @@ export type StrokeGenerationSettings = Readonly<{
   minStrokeLengthMm?: number;
   maxStrokeLengthMm?: number;
   paintLoadLengthMm?: number;
-  direction: "horizontal" | "vertical" | "random" | "flow";
+  joinNearbyStrokes?: boolean;
+  direction: "horizontal" | "vertical" | "random" | "flow" | "image-contours";
+  contourSmoothing?: number;
+  contourSensitivity?: number;
+  contourGapMm?: number;
   overlap: number;
   speedMmPerMin: number;
   pressure: number;
@@ -124,6 +131,7 @@ export type ColorRegionMap = Readonly<{
   heightPx: number;
   paintIds: readonly string[];
   pixels: Uint8Array;
+  luminance?: Float32Array;
 }>;
 
 export function generateParallelStrokes(
@@ -275,6 +283,9 @@ export function generateStyledStrokes(
   if (brush.widthMm <= 0) throw new Error("Brush width must be positive.");
   if (settings.overlap < 0 || settings.overlap >= 1)
     throw new Error("Stroke overlap must be between 0 and 1.");
+  const contourMap = map;
+  const contourField = settings.direction === "image-contours" ? contourDirectionField(map, settings) : undefined;
+  if (settings.style !== "pointillism") map = brushScaleMap(map, canvas, brush.widthMm);
   const requestedSeed = settings.seed.trim();
   const generationSeed = requestedSeed || `${Date.now()}:${Math.random()}`;
   const random = randomFrom(seedFrom(`${generationSeed}:${settings.style}`));
@@ -292,6 +303,41 @@ export function generateStyledStrokes(
   );
   const strokes: Stroke[] = [];
   const covered = new Uint8Array(map.widthPx * map.heightPx);
+  const markCoverage = (points: Stroke["points"], paintIndex: number) => {
+    const radiusX = Math.max(0.5, brush.widthMm * 0.41 / canvas.widthMm * map.widthPx);
+    const radiusY = Math.max(0.5, brush.widthMm * 0.41 / canvas.heightMm * map.heightPx);
+      for (let segment = 1; segment < points.length; segment++) {
+        const from = points[segment - 1];
+        const to = points[segment];
+        const fromX = (from.x / canvas.widthMm) * map.widthPx;
+        const fromY = (from.y / canvas.heightMm) * map.heightPx;
+        const toX = (to.x / canvas.widthMm) * map.widthPx;
+        const toY = (to.y / canvas.heightMm) * map.heightPx;
+        const length = Math.hypot(toX - fromX, toY - fromY);
+        const samples = Math.max(1, Math.ceil(length * 2));
+        for (let sampleIndex = 0; sampleIndex <= samples; sampleIndex++) {
+          const t = sampleIndex / samples;
+          const centerX = fromX + (toX - fromX) * t;
+          const centerY = fromY + (toY - fromY) * t;
+          const minX = Math.max(0, Math.floor(centerX - radiusX));
+          const maxX = Math.min(map.widthPx - 1, Math.ceil(centerX + radiusX));
+          const minY = Math.max(0, Math.floor(centerY - radiusY));
+          const maxY = Math.min(map.heightPx - 1, Math.ceil(centerY + radiusY));
+          for (let coverY = minY; coverY <= maxY; coverY++)
+            for (let coverX = minX; coverX <= maxX; coverX++) {
+              const normalizedX = (coverX + 0.5 - centerX) / radiusX;
+              const normalizedY = (coverY + 0.5 - centerY) / radiusY;
+              const index = coverY * map.widthPx + coverX;
+              if (
+                normalizedX * normalizedX + normalizedY * normalizedY <= 1 &&
+                map.pixels[index] === paintIndex
+              )
+                covered[index] = 1;
+            }
+        }
+      }
+
+  };
   const boundaryDistance = boundaryDistanceField(map);
   const angleSpread =
     settings.style === "realism"
@@ -380,7 +426,7 @@ export function generateStyledStrokes(
             ? Math.PI / 2
             : settings.direction === "random"
               ? random() * Math.PI * 2
-              : flowAngle;
+              : contourField?.[y * map.widthPx + x] ?? flowAngle;
       const organicAngle =
         directionAngle +
         (settings.direction === "random" ? 0 : (random() - 0.5) * angleSpread);
@@ -388,19 +434,14 @@ export function generateStyledStrokes(
         settings.geometry === "contour" && (gradientX || gradientY)
           ? Math.atan2(gradientY, gradientX) + Math.PI / 2
           : organicAngle;
-      const localDepth = fieldAt(x, y);
-      const clearance = Math.min(
-        1,
-        localDepth / Math.max(2, baseLengthPx * 0.28),
-      );
-      const smoothClearance = clearance * clearance * (3 - 2 * clearance);
-      const lengthPx =
-        minLengthPx + (baseLengthPx - minLengthPx) * smoothClearance;
-      const half = (lengthPx * (0.7 + random() * 0.6)) / 2;
-      const trace = (direction: -1 | 1) => {
+      // Let the actual colour boundary clip the path. Distance to a nearby
+      // boundary does not limit how far a stroke can run along that boundary.
+      const lengthPx = minLengthPx + (baseLengthPx - minLengthPx) * (0.85 + random() * 0.15);
+      const half = lengthPx / 2;
+      const trace = (direction: -1 | 1, limit = half) => {
         let lastX = x;
         let lastY = y;
-        for (let distance = 0.25; distance <= half; distance += 0.25) {
+        for (let distance = 0.25; distance <= limit; distance += 0.25) {
           const nextX = Math.round(x + Math.cos(angle) * distance * direction);
           const nextY = Math.round(y + Math.sin(angle) * distance * direction);
           if (
@@ -434,8 +475,9 @@ export function generateStyledStrokes(
             : settings.curvature;
         const bend = half * curveStrength * (random() > 0.5 ? 1 : -1);
         const runs: Array<Array<{ x: number; y: number }>> = [[]];
-        for (let step = 0; step <= 16; step++) {
-          const t = step / 8 - 1;
+        const curveSteps = Math.max(16, Math.ceil(lengthPx * 4));
+        for (let step = 0; step <= curveSteps; step++) {
+          const t = step / curveSteps * 2 - 1;
           const along = half * t;
           const offset = bend * (1 - t * t);
           const pixelX = x + Math.cos(angle) * along - Math.sin(angle) * offset;
@@ -459,7 +501,11 @@ export function generateStyledStrokes(
         if (longest.length < 2) continue;
         points = [longest[0], longest[1], ...longest.slice(2)];
       } else {
-        points = [trace(-1), trace(1)];
+        let first = trace(-1), last = trace(1);
+        const pixelLength = (point: { x: number; y: number }) => Math.hypot(point.x / canvas.widthMm * map.widthPx - x, point.y / canvas.heightMm * map.heightPx - y);
+        if (pixelLength(first) < half - 1) last = trace(1, lengthPx - pixelLength(first));
+        else if (pixelLength(last) < half - 1) first = trace(-1, lengthPx - pixelLength(last));
+        points = [first, last];
       }
       strokes.push({
         type: "stroke",
@@ -473,39 +519,78 @@ export function generateStyledStrokes(
         expectedLoadStart: 1,
         expectedLoadEnd: 0.9,
       });
-      const radiusX = Math.max(0.5, spacingX / 2);
-      const radiusY = Math.max(0.5, spacingY / 2);
-      for (let segment = 1; segment < points.length; segment++) {
-        const from = points[segment - 1];
-        const to = points[segment];
-        const fromX = (from.x / canvas.widthMm) * map.widthPx;
-        const fromY = (from.y / canvas.heightMm) * map.heightPx;
-        const toX = (to.x / canvas.widthMm) * map.widthPx;
-        const toY = (to.y / canvas.heightMm) * map.heightPx;
-        const length = Math.hypot(toX - fromX, toY - fromY);
-        const samples = Math.max(1, Math.ceil(length * 2));
-        for (let sampleIndex = 0; sampleIndex <= samples; sampleIndex++) {
-          const t = sampleIndex / samples;
-          const centerX = fromX + (toX - fromX) * t;
-          const centerY = fromY + (toY - fromY) * t;
-          const minX = Math.max(0, Math.floor(centerX - radiusX));
-          const maxX = Math.min(map.widthPx - 1, Math.ceil(centerX + radiusX));
-          const minY = Math.max(0, Math.floor(centerY - radiusY));
-          const maxY = Math.min(map.heightPx - 1, Math.ceil(centerY + radiusY));
-          for (let coverY = minY; coverY <= maxY; coverY++)
-            for (let coverX = minX; coverX <= maxX; coverX++) {
-              const normalizedX = (coverX - centerX) / radiusX;
-              const normalizedY = (coverY - centerY) / radiusY;
-              const index = coverY * map.widthPx + coverX;
-              if (
-                normalizedX * normalizedX + normalizedY * normalizedY <= 1 &&
-                map.pixels[index] === paintIndex
-              )
-                covered[index] = 1;
-            }
-        }
-      }
+      markCoverage(points, paintIndex);
     }
   }
-  return { formatVersion: 1, projectId, operations: strokes };
+  // The coarse artistic pass can be clipped to small colour islands.
+  // Finish every uncovered material pixel using contiguous local runs.
+  if (settings.style !== "pointillism") {
+    for (let y = 0; y < map.heightPx; y++) for (let x = 0; x < map.widthPx; x++) {
+      const index = y * map.widthPx + x, paintIndex = map.pixels[index];
+      const paintId = map.paintIds[paintIndex];
+      if (!paintId || covered[index]) continue;
+      if (settings.direction === "image-contours") {
+        const start = { x: (x + .5) / map.widthPx * canvas.widthMm, y: (y + .5) / map.heightPx * canvas.heightMm };
+        const initial = contourField?.[index] ?? Math.PI / 4;
+        const stepMm = Math.min(canvas.widthMm / map.widthPx, canvas.heightMm / map.heightPx) * .5;
+        const trace = (sign: number) => {
+          const result = [start]; let position = start, angle = initial + (sign < 0 ? Math.PI : 0);
+          for (let distance = stepMm; distance <= maxLengthMm / 2; distance += stepMm) {
+            const px = Math.floor(position.x / canvas.widthMm * map.widthPx), py = Math.floor(position.y / canvas.heightMm * map.heightPx);
+            if (contourField && settings.geometry !== "linear") {
+              const target = contourField[py * map.widthPx + px];
+              let turn = Math.atan2(Math.sin(target - angle), Math.cos(target - angle));
+              if (turn > Math.PI / 2) turn -= Math.PI;
+              if (turn < -Math.PI / 2) turn += Math.PI;
+              const limit = .02 + settings.curvature * .25;
+              angle += Math.max(-limit, Math.min(limit, turn));
+            }
+            const next = { x: position.x + Math.cos(angle) * stepMm, y: position.y + Math.sin(angle) * stepMm };
+            const nx = Math.floor(next.x / canvas.widthMm * map.widthPx), ny = Math.floor(next.y / canvas.heightMm * map.heightPx);
+            if (nx < 0 || ny < 0 || nx >= map.widthPx || ny >= map.heightPx || map.pixels[ny * map.widthPx + nx] !== paintIndex) break;
+            result.push(next); position = next;
+          }
+          return result;
+        };
+        const backward = trace(-1), forward = trace(1);
+        const points = [...backward.reverse(), ...forward.slice(1)];
+        if (points.length >= 2) {
+          const trajectory = points as unknown as Stroke["points"];
+          strokes.push({ type: "stroke", points: trajectory, paintId, pressure: settings.pressure, speedMmPerMin: settings.speedMmPerMin, expectedLoadStart: 1, expectedLoadEnd: .9 });
+          markCoverage(trajectory, paintIndex);
+        }
+        continue;
+      }
+      let endX = x;
+      const maxPixels = Math.max(1, Math.floor(maxLengthMm / canvas.widthMm * map.widthPx));
+      while (endX + 1 < map.widthPx && endX - x + 1 < maxPixels && map.pixels[y * map.widthPx + endX + 1] === paintIndex) endX++;
+      const points: Stroke["points"] = [
+        { x: (x + 0.25) / map.widthPx * canvas.widthMm, y: (y + 0.5) / map.heightPx * canvas.heightMm },
+        { x: (endX + 0.75) / map.widthPx * canvas.widthMm, y: (y + 0.5) / map.heightPx * canvas.heightMm },
+      ];
+      strokes.push({ type: "stroke", points, paintId, pressure: settings.pressure, speedMmPerMin: settings.speedMmPerMin, expectedLoadStart: 1, expectedLoadEnd: 0.9 });
+      markCoverage(points, paintIndex);
+    }
+  }
+  const operations = settings.joinNearbyStrokes !== false && settings.style !== "pointillism"
+    ? joinNearbyStrokes(strokes, map, canvas, brush.widthMm, maxLengthMm)
+    : strokes;
+  let omittedShortStrokes = 0;
+  const bounded = operations.flatMap(stroke => {
+    let length = 0;
+    const points = [stroke.points[0]];
+    for (let index = 1; index < stroke.points.length; index++) {
+      const from = stroke.points[index - 1], to = stroke.points[index];
+      const segment = Math.hypot(to.x - from.x, to.y - from.y);
+      if (length + segment > maxLengthMm) {
+        const fraction = segment ? (maxLengthMm - length) / segment : 0;
+        if (fraction > 0) points.push({ x: from.x + (to.x - from.x) * fraction, y: from.y + (to.y - from.y) * fraction });
+        length = maxLengthMm; break;
+      }
+      points.push(to); length += segment;
+    }
+    if (length + 1e-6 < (settings.minStrokeLengthMm ?? 0) || points.length < 2) { omittedShortStrokes++; return []; }
+    return [{ ...stroke, points: points as unknown as Stroke["points"] }];
+  });
+  return { formatVersion: 1, projectId, operations: settings.direction === "image-contours" ? [...bounded, ...imageContourStrokes(contourMap, canvas, settings)] : bounded, generationStats: { omittedShortStrokes, minLengthMm, maxLengthMm } };
 }

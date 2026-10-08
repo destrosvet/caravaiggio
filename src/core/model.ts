@@ -8,6 +8,7 @@ export type Move = Readonly<{
 
 export type Stroke = Readonly<{
   type: "stroke";
+  phase?: "contours";
   points: readonly [Point, Point, ...Point[]];
   paintId: string;
   pressure: number;
@@ -23,6 +24,7 @@ export type PaintOperation = Move | Stroke | Wait | Park;
 export type PaintingPlan = Readonly<{
   formatVersion: 1;
   projectId: string;
+  generationStats?: Readonly<{ omittedShortStrokes: number; minLengthMm: number; maxLengthMm: number }>;
   operations: readonly PaintOperation[];
 }>;
 

@@ -1,3 +1,4 @@
+import { defaultWorkspace, parseWorkspace, syncWorkspace, type Workspace } from "../core/workspace.ts";
 export type CanvasSettings = Readonly<{
   widthMm: number;
   heightMm: number;
@@ -51,9 +52,10 @@ type CaravaiggioProjectV1 = Readonly<{
 
 export type CaravaiggioProject = Readonly<
   Omit<CaravaiggioProjectV1, "version" | "canvas"> & {
-    version: 7;
+    version: 8;
     canvas: CanvasSettings;
     palette: readonly PaletteColor[];
+    workspace: Workspace;
     posterization: PosterizationSettings;
     brush: BrushProfile;
     strokeSettings: StrokeGenerationSettings;
@@ -125,7 +127,7 @@ function normalize(value: Record<string, unknown>): CaravaiggioProject {
       value.version === 4 ||
       value.version === 5 ||
       value.version === 6 ||
-      value.version === 7) &&
+      value.version === 7 || value.version === 8) &&
     data.canvas.units !== "mm"
   )
     throw new Error("The project uses unsupported units.");
@@ -143,14 +145,14 @@ function normalize(value: Record<string, unknown>): CaravaiggioProject {
       ? validateStrokeSettings(value.strokeSettings)
       : defaultStrokeSettings();
   const sourceTransform =
-    version === 7
+    version >= 7
       ? validateSourceTransform(value.sourceTransform)
       : version === 6
         ? migrateSourceTransformV6(value.sourceTransform)
         : defaultSourceTransform();
   return {
     format: "caravaiggio-project",
-    version: 7,
+    version: 8,
     id: data.id,
     name: data.name,
     createdAt: data.createdAt,
@@ -163,6 +165,7 @@ function normalize(value: Record<string, unknown>): CaravaiggioProject {
     },
     sourceImage: data.sourceImage,
     palette,
+    workspace: syncWorkspace(parseWorkspace(value.workspace, { widthMm, heightMm }), { widthMm, heightMm }, palette),
     posterization,
     brush,
     strokeSettings,
@@ -325,7 +328,7 @@ function validateBrush(value: unknown): BrushProfile {
 function validateStrokeSettings(value: unknown): StrokeGenerationSettings {
   if (
     !record(value) ||
-    !["horizontal", "vertical", "random", "flow"].includes(
+    !["horizontal", "vertical", "random", "flow", "image-contours"].includes(
       String(value.direction),
     ) ||
     typeof value.overlap !== "number" ||
@@ -363,7 +366,7 @@ function validateStrokeSettings(value: unknown): StrokeGenerationSettings {
   const paintLoadLengthMm =
     typeof value.paintLoadLengthMm === "number" &&
     value.paintLoadLengthMm >= 10 &&
-    value.paintLoadLengthMm <= 500
+    value.paintLoadLengthMm <= 5000
       ? value.paintLoadLengthMm
       : 120;
   const strokeLengthMm =
@@ -394,6 +397,10 @@ function validateStrokeSettings(value: unknown): StrokeGenerationSettings {
     minStrokeLengthMm,
     maxStrokeLengthMm,
     paintLoadLengthMm,
+    contourSmoothing: typeof value.contourSmoothing === "number" && Number.isFinite(value.contourSmoothing) ? Math.max(0, Math.min(1, value.contourSmoothing)) : 0.5,
+    contourSensitivity: typeof value.contourSensitivity === "number" && Number.isFinite(value.contourSensitivity) ? Math.max(0, Math.min(1, value.contourSensitivity)) : 0.5,
+    contourGapMm: typeof value.contourGapMm === "number" && Number.isFinite(value.contourGapMm) ? Math.max(0, Math.min(10, value.contourGapMm)) : 2,
+    joinNearbyStrokes: typeof value.joinNearbyStrokes === "boolean" ? value.joinNearbyStrokes : true,
   } as StrokeGenerationSettings;
 }
 
@@ -443,7 +450,7 @@ export function createProject(name = "New painting"): CaravaiggioProject {
   const now = new Date().toISOString();
   return {
     format: "caravaiggio-project",
-    version: 7,
+    version: 8,
     id: crypto.randomUUID(),
     name,
     createdAt: now,
@@ -456,6 +463,7 @@ export function createProject(name = "New painting"): CaravaiggioProject {
     },
     sourceImage: null,
     palette: defaultPalette(),
+    workspace: syncWorkspace(defaultWorkspace({ widthMm: 300, heightMm: 400 }), { widthMm: 300, heightMm: 400 }, defaultPalette()),
     posterization: defaultPosterization(),
     brush: defaultBrush(),
     strokeSettings: defaultStrokeSettings(),
@@ -472,7 +480,7 @@ export function parseProject(input: string): CaravaiggioProject {
   }
   if (!record(value) || value.format !== "caravaiggio-project")
     throw new Error("The file does not contain a valid project.");
-  if (![1, 2, 3, 4, 5, 6, 7].includes(Number(value.version)))
+  if (![1, 2, 3, 4, 5, 6, 7, 8].includes(Number(value.version)))
     throw new Error("Unsupported project format or version.");
   return normalize(value);
 }

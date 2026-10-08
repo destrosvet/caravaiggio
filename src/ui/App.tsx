@@ -1,3 +1,9 @@
+import { imagePalette } from "../core/imagePalette.ts";
+import { Simulation } from "./Simulation.tsx";
+import type { PaintingPlan } from "../core/model.ts";
+import { createProjectWithDefaultLayout } from "../project/workspaceProfiles.ts";
+import { WorkspaceEditor } from "./WorkspaceEditor.tsx";
+import { ColorPicker } from "./ColorPicker.tsx";
 import {
   ChangeEvent,
   useEffect,
@@ -80,6 +86,19 @@ function readImage(file: File): Promise<SourceImage> {
   });
 }
 
+async function sampleImageColors(source: SourceImage): Promise<Uint8ClampedArray> {
+  const image = new Image();
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve(); image.onerror = () => reject(new Error("Image colours could not be analysed.")); image.src = source.dataUrl;
+  });
+  const scale = Math.min(1, 160 / Math.max(source.widthPx, source.heightPx));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(source.widthPx * scale)); canvas.height = Math.max(1, Math.round(source.heightPx * scale));
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("Image analysis is unavailable.");
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return context.getImageData(0, 0, canvas.width, canvas.height).data;
+}
 function drawTransformedImage(
   context: CanvasRenderingContext2D,
   image: HTMLImageElement,
@@ -128,18 +147,18 @@ function drawBrushTexture(
     const midpointDistance = travelled + lengths[segment - 1] / 2;
     const loadRemaining = Math.max(
       0,
-      1 - midpointDistance / Math.max(1, loadLengthPx),
+      1 - (midpointDistance % Math.max(1, loadLengthPx)) / Math.max(1, loadLengthPx),
     );
     const endSoftening = Math.min(
       1,
       Math.max(
-        0,
+        0.55,
         (totalLength - midpointDistance) / Math.max(1, widthPx * 0.9),
       ),
     );
     context.globalAlpha =
       Math.min(1, 0.72 + pressure * 0.4) *
-      Math.min(1, loadRemaining * 4) *
+      Math.max(0.45, Math.min(1, loadRemaining * 4)) *
       endSoftening;
     context.beginPath();
     context.moveTo(from.x, from.y);
@@ -164,7 +183,7 @@ function drawBrushTexture(
       const along = (sample / samples) * length;
       const remaining = Math.max(
         0,
-        1 - (travelled + along) / Math.max(1, loadLengthPx),
+        1 - ((travelled + along) % Math.max(1, loadLengthPx)) / Math.max(1, loadLengthPx),
       );
       const fade = Math.min(1, remaining * 3.2);
       if (fade <= 0) continue;
@@ -209,8 +228,14 @@ function drawBrushTexture(
   context.globalAlpha = 1;
 }
 
+function strokeSignature(project: CaravaiggioProject): string {
+  const { paintLoadLengthMm, ...geometrySettings } = project.strokeSettings;
+  return JSON.stringify([project.id, project.sourceImage, project.sourceTransform, project.canvas, project.palette, project.brush, geometrySettings]);
+}
 export function App() {
-  const initialProject = useRef(createProject());
+  const [generatedPlan, setGeneratedPlan] = useState<{ plan: PaintingPlan; signature: string } | null>(null);
+  const [editingColorId, setEditingColorId] = useState<string | null>(null);
+  const initialProject = useRef(createProjectWithDefaultLayout());
   const [project, setProject] = useState<CaravaiggioProject>(
     initialProject.current,
   );
@@ -227,9 +252,12 @@ export function App() {
   const paletteSourceCanvas = useRef<HTMLCanvasElement>(null);
   const posterizedCanvas = useRef<HTMLCanvasElement>(null);
   const strokeCanvas = useRef<HTMLCanvasElement>(null);
+  const strokePreviewCache = useRef<{ plan: PaintingPlan; project: CaravaiggioProject; painting: HTMLCanvasElement; trajectories: HTMLCanvasElement } | null>(null);
   const strokeViewport = useRef<HTMLDivElement>(null);
   const [strokeCount, setStrokeCount] = useState(0);
   const [generationRevision, setGenerationRevision] = useState(0);
+  const previewSeed = useRef(crypto.randomUUID());
+  const generatedPreview = useRef<{ project: CaravaiggioProject; revision: number } | null>(null);
   const [strokeZoom, setStrokeZoom] = useState(1);
   const [showTrajectories, setShowTrajectories] = useState(false);
   const [strokeFitSize, setStrokeFitSize] = useState({
@@ -526,7 +554,10 @@ export function App() {
     const canvas = strokeCanvas.current;
     const sourceImage = renderedStrokeProject.sourceImage;
     if (activeStep !== 2 || !canvas || !sourceImage) return;
+    if (generatedPreview.current?.project === renderedStrokeProject &&
+        generatedPreview.current.revision === generationRevision) return;
     const previewProject = renderedStrokeProject;
+    const previewPalette = previewProject.palette;
     const previewAspect =
       previewProject.canvas.widthMm / previewProject.canvas.heightMm;
     const image = new Image();
@@ -551,17 +582,19 @@ export function App() {
       );
       const pixels = sourceContext.getImageData(0, 0, width, height).data;
       const colorMap = new Uint8Array(width * height);
+      const luminance = new Float32Array(width * height);
       for (let pixel = 0; pixel < colorMap.length; pixel++) {
         const offset = pixel * 4;
+        luminance[pixel] = (0.2126 * pixels[offset] + 0.7152 * pixels[offset + 1] + 0.0722 * pixels[offset + 2]) / 255;
         if (pixels[offset + 3] < 16) {
           colorMap[pixel] = 255;
           continue;
         }
         colorMap[pixel] = nearestPaletteIndex(
           { r: pixels[offset], g: pixels[offset + 1], b: pixels[offset + 2] },
-          previewProject.palette,
+          previewPalette,
         );
-        if (previewProject.palette[colorMap[pixel]]?.skipPainting)
+        if (previewPalette[colorMap[pixel]]?.skipPainting)
           colorMap[pixel] = 255;
       }
       const plan = generateStyledStrokes(
@@ -569,18 +602,38 @@ export function App() {
         {
           widthPx: width,
           heightPx: height,
-          paintIds: previewProject.palette.map((color) => color.id),
+          paintIds: previewPalette.map((color) => color.id),
           pixels: colorMap,
+          luminance,
         },
         previewProject.canvas,
         previewProject.brush,
-        previewProject.strokeSettings,
+        { ...previewProject.strokeSettings, seed: previewProject.strokeSettings.seed.trim() || previewSeed.current },
       );
+      generatedPreview.current = { project: previewProject, revision: generationRevision };
+      setGeneratedPlan({ plan, signature: strokeSignature(previewProject) });
+    };
+    image.src = sourceImage.dataUrl;
+    return () => { image.onload = null; };
+  }, [activeStep, generationRevision, renderedStrokeProject]);
+
+  useEffect(() => {
+    const canvas = strokeCanvas.current;
+    if (activeStep !== 2 || !canvas || !generatedPlan ||
+        generatedPlan.signature !== strokeSignature(renderedStrokeProject)) return;
+    const previewProject = renderedStrokeProject;
+    const previewPalette = previewProject.palette;
+    const previewAspect = previewProject.canvas.widthMm / previewProject.canvas.heightMm;
+    const plan = generatedPlan.plan;
+    let cache = strokePreviewCache.current;
+    if (!cache || cache.plan !== plan || cache.project !== previewProject) {
+      const renderPreview = (showTrajectories: boolean) => {
+      const canvas = document.createElement("canvas");
       const previewWidth = 760;
       canvas.width = previewWidth;
       canvas.height = Math.max(1, Math.round(previewWidth / previewAspect));
       const context = canvas.getContext("2d");
-      if (!context) return;
+      if (!context) return canvas;
       context.fillStyle = "#11110f";
       context.fillRect(0, 0, canvas.width, canvas.height);
       context.globalAlpha = showTrajectories ? 1 : 0.9;
@@ -601,7 +654,7 @@ export function App() {
       context.lineWidth = showTrajectories ? 1 : brushWidthPx;
       for (const [strokeIndex, operation] of plan.operations.entries())
         if (operation.type === "stroke") {
-          const paint = previewProject.palette.find(
+          const paint = previewPalette.find(
             (color) => color.id === operation.paintId,
           );
           const previewPoints = operation.points.map((point) => ({
@@ -639,14 +692,22 @@ export function App() {
             );
           }
         }
+      return canvas;
+      };
+      cache = { plan, project: previewProject, painting: renderPreview(false), trajectories: renderPreview(true) };
+      strokePreviewCache.current = cache;
+    }
+    const preview = showTrajectories ? cache.trajectories : cache.painting;
+    canvas.width = preview.width;
+    canvas.height = preview.height;
+    canvas.getContext("2d")?.drawImage(preview, 0, 0);
       setStrokeCount(
         plan.operations.filter((operation) => operation.type === "stroke")
           .length,
       );
-      requestAnimationFrame(fitStrokePreview);
-    };
-    image.src = sourceImage.dataUrl;
-  }, [activeStep, generationRevision, renderedStrokeProject, showTrajectories]);
+      const frame = requestAnimationFrame(fitStrokePreview);
+      return () => cancelAnimationFrame(frame);
+  }, [activeStep, generatedPlan, renderedStrokeProject, showTrajectories]);
 
   useEffect(() => {
     if (!hasUnsavedChanges) return;
@@ -739,8 +800,18 @@ export function App() {
       return setMessage("Select a PNG or JPEG image.");
     try {
       const sourceImage = await readImage(file);
-      setProject((current) => ({
+      const photoPixels = await sampleImageColors(sourceImage);
+      setProject((current) => {
+        const locked = current.palette.filter(color => color.locked);
+        const suggested = imagePalette(photoPixels, current.palette.length, locked.map(color => color.hex));
+        const slots = current.palette.filter(color => !color.locked);
+        const palette = [...locked, ...suggested.map((hex, index) => ({
+          id: slots[index]?.id ?? crypto.randomUUID(), name: `Image colour ${index + 1}`, hex,
+          locked: false, skipPainting: false, restricted: false, hueToleranceDeg: 30, minimumChroma: 0.04,
+        }))];
+        return {
         ...current,
+        palette: palette.length ? palette : current.palette,
         sourceImage,
         sourceTransform: {
           offsetXPercent: 0,
@@ -749,7 +820,8 @@ export function App() {
           scaleY: 1,
           rotationDeg: 0,
         },
-      }));
+      };
+      });
       setMessage(
         `Loaded ${sourceImage.name} · ${sourceImage.widthPx} × ${sourceImage.heightPx} px`,
       );
@@ -845,7 +917,7 @@ export function App() {
           <button
             className="ghost"
             onClick={async () => {
-              if (await replaceProject(() => createProject()))
+              if (await replaceProject(() => createProjectWithDefaultLayout()))
                 setMessage("Created a new project");
             }}
           >
@@ -1116,7 +1188,7 @@ export function App() {
                 <div className="palette-heading">
                   <div>
                     <p className="eyebrow">Physical paints</p>
-                    <small>{project.palette.length} / 8 colors</small>
+                    <small>Active colors: {project.palette.length} / 8</small>
                   </div>
                   <button
                     disabled={project.palette.length >= 8}
@@ -1128,16 +1200,9 @@ export function App() {
                 <div className="color-list">
                   {project.palette.map((color) => (
                     <div className="color-row" key={color.id}>
-                      <input
-                        aria-label={`${color.name} color`}
-                        type="color"
-                        value={color.hex}
-                        onChange={(event) =>
-                          patchPaletteColor(color.id, {
-                            hex: event.target.value.toUpperCase() as `#${string}`,
-                          })
-                        }
-                      />
+                      <button type="button" className="color-swatch-button"
+                        aria-label={`Choose ${color.name} colour`}
+                        style={{ background: color.hex }} onClick={() => setEditingColorId(color.id)} />
                       <input
                         aria-label="Color name"
                         value={color.name}
@@ -1251,6 +1316,8 @@ export function App() {
                     {project.strokeSettings.style[0].toUpperCase() +
                       project.strokeSettings.style.slice(1)}{" "}
                     variation · {strokeCount} strokes
+                    {!!generatedPlan?.plan.generationStats?.omittedShortStrokes && ` · ${generatedPlan.plan.generationStats.omittedShortStrokes} strokes below Min omitted`}
+                    {strokeSignature(project) !== strokeSignature(renderedStrokeProject) && " · Settings changed — Regenerate"}
                   </span>
                   <div className="stroke-zoom-controls">
                     <label className="trajectory-toggle">
@@ -1287,11 +1354,12 @@ export function App() {
                     </button>
                     <button
                       onClick={() => {
+                        previewSeed.current = crypto.randomUUID();
                         setRenderedStrokeProject(project);
                         setGenerationRevision((value) => value + 1);
                       }}
                     >
-                      Generate preview
+                      Regenerate
                     </button>
                   </div>
                 </div>
@@ -1495,8 +1563,21 @@ export function App() {
                       <option value="vertical">Vertical</option>
                       <option value="random">Random</option>
                       <option value="flow">Region flow</option>
+                      <option value="image-contours">Image contours (Canny)</option>
                     </select>
                   </label>
+                  {project.strokeSettings.direction === "image-contours" && <>
+                    <p className="workspace-caption">Fill regions first, then draw image contours with the selected brush. Short contours below Min are omitted.</p>
+                    {([
+                      ["contourSmoothing", "Smoothing", 0, 1, 0.05, 0.5],
+                      ["contourSensitivity", "Edge sensitivity", 0, 1, 0.05, 0.5],
+                      ["contourGapMm", "Connect gaps · mm", 0, 10, 0.5, 2],
+                    ] as const).map(([key, label, min, max, step, fallback]) => <label key={key}>
+                      {label} · {project.strokeSettings[key] ?? fallback}
+                      <input type="range" min={min} max={max} step={step} value={project.strokeSettings[key] ?? fallback}
+                        onChange={event => setProject({ ...project, strokeSettings: { ...project.strokeSettings, [key]: Number(event.target.value) } })} />
+                    </label>)}
+                  </>}
                   <label>
                     Stroke geometry
                     <select
@@ -1598,7 +1679,13 @@ export function App() {
                     />
                   </label>
                   <div className="stroke-length-range">
-                    <p>Adaptive stroke length</p>
+                    <p>Stroke length</p><p className="workspace-caption">Min and Max apply to the full trajectory. Areas too small for Min are omitted; lower Min to retain those details.</p>
+                    <label className="trajectory-toggle"><input type="checkbox"
+                      checked={project.strokeSettings.joinNearbyStrokes !== false}
+                      disabled={project.strokeSettings.style === "pointillism"}
+                      onChange={event => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, joinNearbyStrokes: event.target.checked } }))} />
+                      Connect nearby strokes of the same colour
+                    </label>
                     <label>
                       Min ·{" "}
                       {Math.round(
@@ -1688,6 +1775,14 @@ export function App() {
               </button>
             </div>
           </section>
+        ) : activeStep === 3 ? (
+          <WorkspaceEditor project={project}
+            onChange={workspace => setProject(current => ({ ...current, workspace }))}
+            onBack={() => setActiveStep(2)} onNext={() => goToStep(4)} />
+        ) : activeStep === 4 ? (
+          <Simulation project={project} onCapacityChange={paintLoadLengthMm => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, paintLoadLengthMm } }))}
+            plan={generatedPlan?.signature === strokeSignature(project) ? generatedPlan.plan : null}
+            onBack={() => setActiveStep(3)} onRegenerate={() => goToStep(2)} onNext={() => goToStep(5)} />
         ) : (
           <section className="planned-step">
             <p className="eyebrow">
@@ -1753,6 +1848,13 @@ export function App() {
           </section>
         )}
       </main>
+      {editingColorId && (() => {
+        const color = project.palette.find(entry => entry.id === editingColorId);
+        return color ? <ColorPicker key={color.id} name={color.name} hex={color.hex}
+          image={project.sourceImage?.dataUrl} sourceCanvas={paletteSourceCanvas}
+          onChange={hex => patchPaletteColor(color.id, { hex })}
+          onClose={() => setEditingColorId(null)} /> : null;
+      })()}
       <input
         hidden
         ref={imageInput}

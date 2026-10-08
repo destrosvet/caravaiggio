@@ -1,0 +1,50 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { PaintingPlan, Stroke } from "../src/core/model.ts";
+import { buildSimulation, segmentIntersectsZone, simulationPosition } from "../src/core/simulation.ts";
+import { createProject } from "../src/project/model.ts";
+const stroke = (paintId: string, y = 20): Stroke => ({ type: "stroke", points: [{ x: 10, y }, { x: 160, y }], paintId, pressure: 0.5, speedMmPerMin: 300, expectedLoadStart: 1, expectedLoadEnd: 0 });
+const plan = (operations: Stroke[]): PaintingPlan => ({ formatVersion: 1, projectId: "test", operations });
+test("simulation splits exhausted strokes and resumes at the exact same position", () => {
+  const project = createProject();
+  const timeline = buildSimulation(plan([stroke("cadmium-red")]), project.workspace, 50, 6);
+  assert.deepEqual(timeline.issues, []);
+  assert.equal(timeline.loads, 3);
+  assert.equal(timeline.strokes, 1);
+  assert.equal(timeline.cleans, 1);
+  assert.equal(timeline.paintDistance, 150);
+  const marks = timeline.events.filter(event => event.type === "stroke");
+  assert.equal(marks.length, 3);
+  assert.deepEqual(marks[0].from, { x: 60, y: 70 });
+  assert.deepEqual(marks[2].to, { x: 210, y: 70 });
+  assert.deepEqual(marks[0].to, marks[1].from);
+  assert.ok(marks.every(event => event.loadStart === 1 && event.loadEnd === 0));
+  assert.equal(marks.reduce((sum, event) => sum + event.end - event.start, 0), 30);
+  assert.equal(timeline.events.at(-1)?.type, "park");
+});
+test("colour changes wash and wipe before loading the next paint", () => {
+  const project = createProject();
+  const timeline = buildSimulation(plan([stroke("cadmium-red"), stroke("ultramarine-blue", 40)]), project.workspace, 1000, 6);
+  assert.equal(timeline.cleans, 2);
+  assert.equal(timeline.loads, 2);
+  const service = timeline.events.filter(event => ["clean", "wipe", "load"].includes(event.type)).map(event => event.type);
+  assert.deepEqual(service, ["load", "clean", "wipe", "load", "clean", "wipe"]);
+  assert.deepEqual(buildSimulation(plan([stroke("cadmium-red")]), project.workspace, 50, 6), buildSimulation(plan([stroke("cadmium-red")]), project.workspace, 50, 6));
+  for (let index = 1; index < timeline.events.length; index++) assert.equal(timeline.events[index - 1].end, timeline.events[index].start);
+});
+test("simulation rejects missing paint containers and forbidden paths", () => {
+  const project = createProject();
+  assert.ok(buildSimulation(plan([stroke("missing")]), project.workspace, 100, 6).issues.some(issue => issue.includes("Missing paint")));
+  const forbidden = { id: "clamp", name: "Clamp", type: "forbidden" as const, x: 40, y: 0, width: 10, height: 40 };
+  const timeline = buildSimulation(plan([stroke("cadmium-red")]), { ...project.workspace, zones: [...project.workspace.zones, forbidden] }, 100, 6);
+  assert.ok(timeline.issues.some(issue => issue.includes("brush path crosses")));
+  assert.equal(segmentIntersectsZone({ x: 0, y: 10 }, { x: 80, y: 10 }, forbidden), true);
+  assert.equal(segmentIntersectsZone({ x: 0, y: 80 }, { x: 80, y: 80 }, forbidden), false);
+});
+test("timeline interpolation clamps before and after an event", () => {
+  const project = createProject();
+  const event = buildSimulation(plan([stroke("cadmium-red")]), project.workspace, 200, 6).events.find(event => event.type === "stroke")!;
+  assert.deepEqual(simulationPosition(event, event.start - 1), event.from);
+  assert.deepEqual(simulationPosition(event, event.end + 1), event.to);
+  assert.equal(simulationPosition(event, (event.start + event.end) / 2).x, 135);
+});

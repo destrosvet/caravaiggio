@@ -38,3 +38,21 @@ test("HSL controls preserve a color through conversion", () => {
   const converted = hslToHex(...hsl).slice(1).match(/../g)?.map((value) => Number.parseInt(value, 16)) ?? [];
   assert.ok(converted.every((value, index) => Math.abs(value - original[index]) <= 1));
 });
+
+test("muted foliage uses available green paints instead of beige or brown mixtures", () => {
+  const palette = ["#F4F0E6", "#1B1918", "#3EEE11", "#33BB36", "#5342F0", "#C7A86C", "#746348", "#6D654A"];
+  // Sampled from the supplied photograph: sunlit, muted and shaded foliage.
+  for (const source of [{ r: 149, g: 157, b: 48 }, { r: 116, g: 127, b: 48 }, { r: 98, g: 115, b: 46 }]) {
+    assert.deepEqual(nearestPaletteColor(source, palette), { r: 51, g: 187, b: 54 });
+  }
+  const skin = nearestPaletteColor({ r: 163, g: 110, b: 96 }, palette);
+  assert.ok(skin.r > skin.g && skin.g > skin.b);
+  const neutral = nearestPaletteColor({ r: 180, g: 180, b: 180 }, palette);
+  assert.notDeepEqual(neutral, { r: 51, g: 187, b: 54 });
+});
+
+test("hue family preference respects accent restrictions and falls back when no family exists", () => {
+  const source = { r: 98, g: 115, b: 46 };
+  assert.deepEqual(nearestPaletteColor(source, ["#C7A86C", { hex: "#33BB36", restricted: true, hueToleranceDeg: 1 }]), { r: 199, g: 168, b: 108 });
+  assert.deepEqual(nearestPaletteColor(source, ["#C7A86C"]), { r: 199, g: 168, b: 108 });
+});

@@ -28,7 +28,7 @@ test("a project preserves its image and dimensions after serialization and reope
   assert.equal(reopened.name, project.name);
   assert.deepEqual(reopened.canvas, saved.canvas);
   assert.deepEqual(reopened.sourceImage, saved.sourceImage);
-  assert.equal(reopened.version, 7);
+  assert.equal(reopened.version, 8);
 });
 
 test("a v1 project is migrated to the current version when opened", () => {
@@ -39,7 +39,7 @@ test("a v1 project is migrated to the current version when opened", () => {
     canvas: { widthMm: 210, heightMm: 297, orientation: "portrait" },
   };
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.version, 7);
+  assert.equal(migrated.version, 8);
   assert.equal(migrated.canvas.units, "mm");
   assert.equal(migrated.palette.length, 4);
 });

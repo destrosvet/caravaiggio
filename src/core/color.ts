@@ -105,6 +105,16 @@ export function perceptualPaintDistance(
   const axisDistance =
     (source[1] - candidate[1]) ** 2 + (source[2] - candidate[2]) ** 2;
   const hueDistance = Math.max(0, axisDistance - chromaDelta ** 2);
+  // A muted candidate must not win just because its chroma is closer.
+  // Compare hue directions independently of candidate chroma, with a
+  // smooth fade near neutral source pixels where hue is unreliable.
+  const hueConfidence = Math.min(1, sourceChroma / 0.08) ** 2;
+  const hueAlignment = sourceChroma > 1e-6 && candidateChroma > 0.02
+    ? Math.max(-1, Math.min(1,
+        (source[1] * candidate[1] + source[2] * candidate[2]) /
+        (sourceChroma * candidateChroma)))
+    : 0;
+  const hueDirectionPenalty = 0.12 * hueConfidence * (1 - hueAlignment);
   const neutralPenalty =
     sourceChroma < 0.035 && candidateChroma > 0.075
       ? (candidateChroma - sourceChroma) ** 2 * 8
@@ -113,6 +123,7 @@ export function perceptualPaintDistance(
     lightnessDelta ** 2 * 0.45 +
     chromaDelta ** 2 * 2.2 +
     hueDistance * 3.2 +
+    hueDirectionPenalty +
     neutralPenalty
   );
 }
@@ -146,8 +157,22 @@ function nearestPaletteMatch(
   const eligible = paints.filter((paint) =>
     isEligible(source, rgbToOklab(hexToRgb(paint.hex)), paint),
   );
-  const candidates = eligible.length
-    ? eligible
+  // Keep chromatic pixels in their dominant RGB hue family when that
+  // family exists in the eligible palette. This prevents muted earth tones
+  // from replacing foliage just because their saturation is closer.
+  const hueFamily = (rgb: Rgb) =>
+    rgb.g >= rgb.r && rgb.g > rgb.b ? "green"
+      : rgb.b > rgb.r && rgb.b >= rgb.g ? "blue" : "red";
+  const sameFamily = Math.hypot(source[1], source[2]) >= 0.04
+    ? eligible.filter(paint => {
+        const rgb = hexToRgb(paint.hex);
+        const lab = rgbToOklab(rgb);
+        return hueFamily(rgb) === hueFamily(color) && Math.hypot(lab[1], lab[2]) >= 0.04;
+      })
+    : [];
+  const hueCandidates = sameFamily.length ? sameFamily : eligible;
+  const candidates = hueCandidates.length
+    ? hueCandidates
     : paints.filter((paint) => !paint.restricted);
   const fallback = candidates.length ? candidates : paints;
   let nearest = hexToRgb(fallback[0].hex);
