@@ -131,7 +131,7 @@ export function perceptualPaintDistance(
 const hueDegrees = (lab: readonly [number, number, number]) =>
   ((Math.atan2(lab[2], lab[1]) * 180) / Math.PI + 360) % 360;
 
-function isEligible(
+export function isPaintEligible(
   source: readonly [number, number, number],
   candidate: readonly [number, number, number],
   paint: PaletteMatch,
@@ -155,7 +155,7 @@ function nearestPaletteMatch(
     index,
   }));
   const eligible = paints.filter((paint) =>
-    isEligible(source, rgbToOklab(hexToRgb(paint.hex)), paint),
+    isPaintEligible(source, rgbToOklab(hexToRgb(paint.hex)), paint),
   );
   // Keep chromatic pixels in their dominant RGB hue family when that
   // family exists in the eligible palette. This prevents muted earth tones

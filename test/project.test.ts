@@ -28,7 +28,7 @@ test("a project preserves its image and dimensions after serialization and reope
   assert.equal(reopened.name, project.name);
   assert.deepEqual(reopened.canvas, saved.canvas);
   assert.deepEqual(reopened.sourceImage, saved.sourceImage);
-  assert.equal(reopened.version, 8);
+  assert.equal(reopened.version, 14);
 });
 
 test("a v1 project is migrated to the current version when opened", () => {
@@ -39,7 +39,7 @@ test("a v1 project is migrated to the current version when opened", () => {
     canvas: { widthMm: 210, heightMm: 297, orientation: "portrait" },
   };
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.version, 8);
+  assert.equal(migrated.version, 14);
   assert.equal(migrated.canvas.units, "mm");
   assert.equal(migrated.palette.length, 4);
 });
@@ -61,18 +61,28 @@ test("a v6 uniform source transform is migrated to independent axes", () => {
   assert.equal(migrated.sourceTransform.scaleY, 1.5);
 });
 
-test("a palette with more than eight colors is rejected", () => {
+test("a palette larger than eight survives project save and reopen", () => {
   const project = createProject();
-  const palette = Array.from({ length: 9 }, (_, index) => ({
+  const palette = Array.from({ length: 16 }, (_, index) => ({
+    ...project.palette[1],
     id: `color-${index}`,
     name: `Color ${index}`,
-    hex: "#112233",
+    hex: "#112233" as const,
     locked: false,
   }));
-  assert.throws(
-    () => parseProject(JSON.stringify({ ...project, palette })),
-    /between 1 and 8 colors/,
-  );
+  const reopened = parseProject(serializeProject({ ...project, palette }));
+  assert.deepEqual(reopened.palette, palette);
+  assert.equal(reopened.workspace.zones.filter(zone => zone.type === "paint").length, 16);
+  const paintSlots = reopened.workspace.zones.filter(zone => zone.type === "paint").map(({ x, y, width, height }) => ({ x, y, width, height }));
+  const savedSlots = parseProject(serializeProject({ ...reopened, workspace: { ...reopened.workspace, paintSlots } }));
+  assert.deepEqual(savedSlots.workspace.paintSlots, paintSlots);
+});
+
+test("palettes reserve pixel map index 255 for the mask", () => {
+  const project = createProject();
+  const palette = Array.from({ length: 255 }, (_, index) => ({ ...project.palette[1], id: `paint-${index}` }));
+  assert.equal(parseProject(serializeProject({ ...project, palette })).palette.length, 255);
+  assert.throws(() => parseProject(JSON.stringify({ ...project, palette: [...palette, { ...project.palette[1], id: "overflow" }] })), /between 1 and 255/);
 });
 
 test("corrupted image data is rejected", () => {

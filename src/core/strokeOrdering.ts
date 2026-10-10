@@ -31,6 +31,15 @@ function routeLength(strokes: readonly Stroke[], start: Point, end: Point): numb
 export function optimizeStrokeOrder(plan: PaintingPlan, workspace: Workspace): PaintingPlan {
   // Explicit waits/moves are ordering barriers and must remain intact.
   if (plan.operations.some(operation => operation.type !== "stroke")) return plan;
+  if (plan.operations.some(operation => operation.type === "stroke" && operation.phase === "shadows") &&
+      plan.operations.some(operation => operation.type === "stroke" && operation.phase !== "shadows")) {
+    const base = optimizeStrokeOrder({ ...plan, operations: plan.operations.filter(op => op.type === "stroke" && op.phase !== "shadows") }, workspace);
+    const lastBase = base.operations.at(-1);
+    const shadowOperations = plan.operations.filter((op): op is Stroke => op.type === "stroke" && op.phase === "shadows");
+    if (lastBase?.type === "stroke") shadowOperations.sort((a, b) => Number(b.paintId === lastBase.paintId) - Number(a.paintId === lastBase.paintId));
+    const shadows = optimizeStrokeOrder({ ...plan, operations: shadowOperations }, workspace);
+    return { ...plan, operations: [...base.operations, ...shadows.operations] };
+  }
   if (plan.operations.some(operation => operation.type === "stroke" && operation.phase === "contours") &&
       plan.operations.some(operation => operation.type === "stroke" && !operation.phase)) {
     const fill = optimizeStrokeOrder({ ...plan, operations: plan.operations.filter(op => op.type === "stroke" && !op.phase) }, workspace);

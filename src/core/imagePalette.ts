@@ -1,9 +1,10 @@
 import { hexToRgb, perceptualPaintDistance, rgbToOklab } from "./color.ts";
+import { maxPaletteColors } from "./paletteLimits.ts";
 type Sample = { weight: number; r: number; g: number; b: number; lab: readonly [number, number, number] };
 const hex = (sample: Sample): `#${string}` => `#${[sample.r, sample.g, sample.b].map(value => Math.round(value).toString(16).padStart(2, "0")).join("").toUpperCase()}`;
 /** Weighted, deterministic clustering of visible photo pixels in OKLab. */
 export function imagePalette(pixels: Uint8ClampedArray, count = 4, locked: readonly string[] = []): readonly `#${string}`[] {
-  if (!Number.isInteger(count) || count < 1 || count > 8) throw new Error("Palette size must be between 1 and 8.");
+  if (!Number.isInteger(count) || count < 1 || count > maxPaletteColors) throw new Error(`Palette size must be between 1 and ${maxPaletteColors}.`);
   const remaining = Math.max(0, count - locked.length);
   if (!remaining) return [];
   const histogram = new Map<number, { weight: number; r: number; g: number; b: number }>();

@@ -10,7 +10,7 @@ test("workspace survives save and reopen including custom zones and positions", 
 test("v7 projects without workspace receive a valid default layout", () => {
   const { workspace, ...project } = createProject();
   const migrated = parseProject(JSON.stringify({ ...project, version: 7 }));
-  assert.equal(migrated.version, 8);
+  assert.equal(migrated.version, 14);
   assert.deepEqual(validateWorkspace(migrated.workspace), []);
   assert.equal(migrated.workspace.zones.filter(zone => zone.type === "paint").length, 3);
 });

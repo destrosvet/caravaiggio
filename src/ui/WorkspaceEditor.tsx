@@ -4,6 +4,16 @@ import { useMemo, useRef, useState, type PointerEvent } from "react";
 import { syncWorkspace, validateWorkspace, type Workspace, type WorkspaceZone } from "../core/workspace.ts";
 import type { CaravaiggioProject } from "../project/model.ts";
 type Props = { project: CaravaiggioProject; onChange: (workspace: Workspace) => void; onBack: () => void; onNext: () => void };
+const gridStorageKey = "caravaiggio.workspace-grid.v1";
+const gridSizes = [1, 5, 10, 25] as const;
+type GridSettings = { snap: boolean; size: number };
+function readGridSettings(): GridSettings {
+  try {
+    const value = JSON.parse(localStorage.getItem(gridStorageKey) ?? "null");
+    if (value && typeof value.snap === "boolean" && gridSizes.some(size => size === value.size)) return { snap: value.snap, size: value.size };
+  } catch { /* The editor still works if storage is unavailable. */ }
+  return { snap: true, size: 10 };
+}
 export function WorkspaceEditor({ project, onChange, onBack, onNext }: Props) {
   const workspace = useMemo(() => syncWorkspace(project.workspace, project.canvas, project.palette), [project.workspace, project.canvas, project.palette]);
   const [profileState, setProfileState] = useState<{ data: LayoutProfiles; message: string }>(() => {
@@ -18,9 +28,14 @@ export function WorkspaceEditor({ project, onChange, onBack, onNext }: Props) {
   };
   const [selection, setSelection] = useState("canvas");
   const [editingZone, setEditingZone] = useState<WorkspaceZone | null>(null);
+  const [grid, setGrid] = useState(readGridSettings);
+  const updateGrid = (next: GridSettings) => {
+    setGrid(next);
+    try { localStorage.setItem(gridStorageKey, JSON.stringify(next)); } catch { /* Keep the current session preference. */ }
+  };
   const issues = useMemo(() => validateWorkspace(workspace), [workspace]);
   const svg = useRef<SVGSVGElement>(null);
-  const drag = useRef<{ id: string; x: number; y: number; startX: number; startY: number } | null>(null);
+  const drag = useRef<{ id: string; x: number; y: number; startX: number; startY: number; moved?: boolean } | null>(null);
   const patch = (id: string, changes: Partial<WorkspaceZone>) => onChange({ ...workspace, zones: workspace.zones.map(zone => zone.id === id ? { ...zone, ...changes } : zone) });
   const position = (event: PointerEvent<SVGElement>) => {
     const matrix = svg.current?.getScreenCTM();
@@ -54,19 +69,33 @@ export function WorkspaceEditor({ project, onChange, onBack, onNext }: Props) {
     </div>
     <div className="workspace-layout">
       <div className="workspace-map">
+        <div className="workspace-grid-toolbar">
+          <label className="trajectory-toggle"><input type="checkbox" checked={grid.snap} onChange={event => updateGrid({ ...grid, snap: event.target.checked })} /><span>Snap to grid</span></label>
+          <label>Grid spacing<select value={grid.size} onChange={event => updateGrid({ ...grid, size: Number(event.target.value) })}>{gridSizes.map(size => <option key={size} value={size}>{size} mm</option>)}</select></label>
+          <span className="workspace-caption">Hold Alt while dragging for free positioning.</span>
+        </div>
         <svg ref={svg} viewBox={`-15 -15 ${workspace.width + 30} ${workspace.height + 30}`} aria-label="Machine workspace in millimetres"
-          onPointerMove={event => { if (!drag.current) return; const point = position(event), current = drag.current; patch(current.id, { x: Math.round((current.x + point.x - current.startX) * 10) / 10, y: Math.round((current.y + point.y - current.startY) * 10) / 10 }); }}
-          onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
-          <defs><pattern id="workspace-grid" width="25" height="25" patternUnits="userSpaceOnUse"><path d="M 25 0 L 0 0 0 25" fill="none" stroke="#ffffff12" strokeWidth="1" /></pattern><pattern id="workspace-forbidden" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="10" height="10" fill="#763730" /><path d="M-2 2L2-2M0 10L10 0M8 12L12 8" stroke="#d97868" strokeWidth="2" /></pattern></defs>
+          onPointerMove={event => {
+            if (!drag.current) return;
+            const point = position(event), current = drag.current;
+            if (!current.moved && point.x === current.startX && point.y === current.startY) return;
+            current.moved = true;
+            const increment = grid.snap && !event.altKey ? grid.size : .1;
+            const snap = (value: number) => Math.round(Math.round(value / increment) * increment * 10) / 10;
+            patch(current.id, { x: snap(current.x + point.x - current.startX), y: snap(current.y + point.y - current.startY) });
+          }}
+          onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}>
+          <defs><pattern id="workspace-grid" width={grid.size} height={grid.size} patternUnits="userSpaceOnUse"><path d={`M ${grid.size} 0 L 0 0 0 ${grid.size}`} fill="none" stroke="#ffffff12" strokeWidth=".5" /></pattern><pattern id="workspace-grid-major" width={grid.size * 5} height={grid.size * 5} patternUnits="userSpaceOnUse"><path d={`M ${grid.size * 5} 0 L 0 0 0 ${grid.size * 5}`} fill="none" stroke="#ffffff25" strokeWidth="1" /></pattern><pattern id="workspace-forbidden" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="10" height="10" fill="#763730" /><path d="M-2 2L2-2M0 10L10 0M8 12L12 8" stroke="#d97868" strokeWidth="2" /></pattern></defs>
           <rect width={workspace.width} height={workspace.height} fill="#181916" stroke="#77736a" /><rect width={workspace.width} height={workspace.height} fill="url(#workspace-grid)" />
+          <rect width={workspace.width} height={workspace.height} fill="url(#workspace-grid-major)" />
           {workspace.zones.map(zone => <g key={zone.id} role="button" aria-label={`Select ${zone.name}`} tabIndex={0} className="workspace-zone" onDoubleClick={() => { drag.current = null; setEditingZone(zone); }}
             onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelection(zone.id); setEditingZone(zone); } }}
-            onPointerDown={event => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); setSelection(zone.id); const point = position(event); drag.current = { id: zone.id, x: zone.x, y: zone.y, startX: point.x, startY: point.y }; }}>
+            onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); setSelection(zone.id); const point = position(event); drag.current = { id: zone.id, x: zone.x, y: zone.y, startX: point.x, startY: point.y }; }}>
             <rect x={zone.x} y={zone.y} width={zone.width} height={zone.height} rx={zone.type === "paint" || zone.type === "water" ? 5 : 1} fill={fill(zone)} stroke={selection === zone.id ? "#e7bf72" : "#ffffff70"} strokeWidth={selection === zone.id ? 3 : 1} />
             <text x={zone.x + zone.width / 2} y={zone.y + zone.height / 2} textAnchor="middle" dominantBaseline="middle" className="workspace-zone-label">{zone.type === "canvas" ? `Canvas · ${zone.width} × ${zone.height} mm` : zone.name}</text>
           </g>)}
         </svg>
-        <p className="workspace-caption">{workspace.width} × {workspace.height} mm · Grid 25 mm · Safe travel Z {workspace.safeZ} mm</p>
+        <p className="workspace-caption">{workspace.width} × {workspace.height} mm · Grid {grid.size} mm · Snap {grid.snap ? "on" : "off"} · Safe travel Z {workspace.safeZ} mm. Snaps zone top-left corners; numeric positions remain exact.</p>
       </div>
       <aside className="workspace-settings">
         <p className="eyebrow">Machine area</p><div className="workspace-fields">

@@ -9,7 +9,9 @@
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
     "demo": "node src/demo.ts",
-    "test": "node --test test/*.test.ts"
+    "trajectories": "node --experimental-strip-types src/trajectoryLab.ts",
+    "test": "node --test test/*.test.ts",
+    "test:ui": "vitest run test/StrokeTemplatePanel.test.tsx test/FocusMaskEditor.test.tsx test/WorkspaceEditor.test.tsx"
   },
   "engines": {
     "node": ">=24"
@@ -18,6 +20,7 @@
     "@tauri-apps/api": "^2.12.1",
     "@tauri-apps/plugin-dialog": "^2.8.1",
     "@tauri-apps/plugin-fs": "^2.6.0",
+    "mixbox": "2.0.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

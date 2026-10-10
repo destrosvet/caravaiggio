@@ -2,6 +2,11 @@ import { contourDirectionField, imageContourStrokes } from "./imageContours.ts";
 import { brushScaleMap } from "./brushScaleMap.ts";
 import { joinNearbyStrokes } from "./strokeJoining.ts";
 import type { PaintingPlan, Stroke } from "./model.ts";
+import { generateReferenceStrokes } from "./referenceStrategies.ts";
+import type { StrategyId } from "./strategySchema.ts";
+import type { PaintSimulationSettings } from "./paintRaster.ts";
+import { addShadowStrokes, type ShadowSettings, type ShadowPaint } from "./shadows.ts";
+import type { PrioritySettings } from "./priority.ts";
 
 export type BrushProfile = Readonly<{
   name: string;
@@ -10,6 +15,12 @@ export type BrushProfile = Readonly<{
 }>;
 
 export type StrokeGenerationSettings = Readonly<{
+  templateId?: string;
+  strategy?: StrategyId;
+  strategyParameters?: Readonly<Record<string, number>>;
+  paintSimulation?: PaintSimulationSettings;
+  shadows?: ShadowSettings;
+  priority?: PrioritySettings;
   style:
     | "realism"
     | "impressionism"
@@ -132,6 +143,9 @@ export type ColorRegionMap = Readonly<{
   paintIds: readonly string[];
   pixels: Uint8Array;
   luminance?: Float32Array;
+  palette?: readonly ShadowPaint[];
+  sourceRgba?: Uint8ClampedArray;
+  priorityMap?: Float32Array;
 }>;
 
 export function generateParallelStrokes(
@@ -272,12 +286,19 @@ function boundaryDistanceField(map: ColorRegionMap): Float32Array {
 }
 
 export function generateStyledStrokes(
+  projectId: string, map: ColorRegionMap, canvas: Readonly<{ widthMm: number; heightMm: number }>, brush: BrushProfile, settings: StrokeGenerationSettings,
+): PaintingPlan {
+  return addShadowStrokes(generateBaseStrokes(projectId, map, canvas, brush, settings), map, canvas, brush, settings);
+}
+
+function generateBaseStrokes(
   projectId: string,
   map: ColorRegionMap,
   canvas: Readonly<{ widthMm: number; heightMm: number }>,
   brush: BrushProfile,
   settings: StrokeGenerationSettings,
 ): PaintingPlan {
+  if (settings.strategy && settings.strategy !== "legacy") return generateReferenceStrokes(projectId, map, canvas, brush, settings);
   if (map.pixels.length !== map.widthPx * map.heightPx)
     throw new Error("Color map dimensions do not match its pixel data.");
   if (brush.widthMm <= 0) throw new Error("Brush width must be positive.");

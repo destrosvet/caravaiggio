@@ -1,13 +1,15 @@
 export type WorkspaceZone = Readonly<{ id: string; type: "canvas" | "paint" | "water" | "wipe" | "parking" | "forbidden"; name: string; x: number; y: number; width: number; height: number; paintId?: string }>;
 export type Workspace = Readonly<{ width: number; height: number; safeZ: number; paintSlots?: readonly Readonly<{ x: number; y: number; width: number; height: number }>[]; zones: readonly WorkspaceZone[] }>;
+import { maxPaletteColors } from "./paletteLimits.ts";
 type Canvas = Readonly<{ widthMm: number; heightMm: number }>;
 type Paint = Readonly<{ id: string; name: string; skipPainting: boolean }>;
-export function defaultWorkspace(canvas: Canvas): Workspace {
+export function defaultWorkspace(canvas: Canvas, paintCount = 8): Workspace {
   const x = canvas.widthMm + 100;
-  return { width: Math.max(600, x + 120), height: Math.max(600, canvas.heightMm + 100), safeZ: 15, zones: [
+  const waterY = Math.max(250, 50 + Math.ceil(paintCount / 2) * 45);
+  return { width: Math.max(600, x + 120), height: Math.max(600, canvas.heightMm + 100, waterY + 180), safeZ: 15, zones: [
     { id: "canvas", type: "canvas", name: "Canvas", x: 50, y: 50, width: canvas.widthMm, height: canvas.heightMm },
-    { id: "water", type: "water", name: "Water", x, y: 250, width: 60, height: 60 },
-    { id: "wipe", type: "wipe", name: "Wiping area", x, y: 340, width: 70, height: 40 },
+    { id: "water", type: "water", name: "Water", x, y: waterY, width: 60, height: 60 },
+    { id: "wipe", type: "wipe", name: "Wiping area", x, y: waterY + 90, width: 70, height: 40 },
     { id: "parking", type: "parking", name: "Parking", x: 10, y: 10, width: 20, height: 20 },
   ] };
 }
@@ -19,7 +21,14 @@ export function syncWorkspace(workspace: Workspace, canvas: Canvas, palette: rea
     return zone;
   });
   paints.forEach((paint, index) => {
-    if (!zones.some(zone => zone.type === "paint" && zone.paintId === paint.id)) zones.push({ id: `paint:${paint.id}`, type: "paint", paintId: paint.id, name: paint.name, x: canvas.widthMm + 100 + index % 2 * 45, y: 30 + Math.floor(index / 2) * 45, width: 32, height: 32, ...workspace.paintSlots?.[index] });
+    if (!zones.some(zone => zone.type === "paint" && zone.paintId === paint.id)) {
+      const slot = workspace.paintSlots?.[index];
+      let y = 30 + Math.floor(index / 2) * 45;
+      const x = canvas.widthMm + 100 + index % 2 * 45;
+      // Automatic new cups avoid existing equipment; saved physical slots win.
+      if (!slot) while (zones.some(zone => x < zone.x + zone.width && x + 32 > zone.x && y < zone.y + zone.height && y + 32 > zone.y)) y += 45;
+      zones.push({ id: `paint:${paint.id}`, type: "paint", paintId: paint.id, name: paint.name, x, y, width: 32, height: 32, ...slot });
+    }
   });
   return { ...workspace, zones };
 }
@@ -36,8 +45,8 @@ export function parseWorkspace(value: unknown, canvas: Canvas): Workspace {
   if (value === undefined) return defaultWorkspace(canvas);
   const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
   const positive = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
-  if (!object(value) || !positive(value.width) || !positive(value.height) || !positive(value.safeZ) || !Array.isArray(value.zones) || value.zones.length > 100) throw new Error("Invalid workspace dimensions or zones.");
-  if (value.paintSlots !== undefined && (!Array.isArray(value.paintSlots) || value.paintSlots.length > 8 || value.paintSlots.some(slot => !object(slot) || typeof slot.x !== "number" || !Number.isFinite(slot.x) || typeof slot.y !== "number" || !Number.isFinite(slot.y) || !positive(slot.width) || !positive(slot.height)))) throw new Error("Invalid paint slots.");
+  if (!object(value) || !positive(value.width) || !positive(value.height) || !positive(value.safeZ) || !Array.isArray(value.zones) || value.zones.length > maxPaletteColors + 100) throw new Error("Invalid workspace dimensions or zones.");
+  if (value.paintSlots !== undefined && (!Array.isArray(value.paintSlots) || value.paintSlots.length > maxPaletteColors || value.paintSlots.some(slot => !object(slot) || typeof slot.x !== "number" || !Number.isFinite(slot.x) || typeof slot.y !== "number" || !Number.isFinite(slot.y) || !positive(slot.width) || !positive(slot.height)))) throw new Error("Invalid paint slots.");
   const ids = new Set<string>();
   const types = ["canvas", "paint", "water", "wipe", "parking", "forbidden"];
   for (const zone of value.zones) {

@@ -1,4 +1,12 @@
+import { StrokeTemplatePanel } from "./StrokeTemplatePanel.tsx";
+import { FocusMaskEditor } from "./FocusMaskEditor.tsx";
+import { medianFilterPixels } from "../core/medianFilter.ts";
+import { renderPaintTimeline, paintSimulationDefaults, paintPreviewLongestEdge } from "../core/paintRaster.ts";
+import { strokePreviewTimeline } from "../core/strokePreview.ts";
+import { strategySchemas } from "../core/strategySchema.ts";
 import { imagePalette } from "../core/imagePalette.ts";
+import { defaultImagePaletteSize, maxPaletteColors } from "../core/paletteLimits.ts";
+import { detailPriorityMap, priorityDefaults } from "../core/priority.ts";
 import { Simulation } from "./Simulation.tsx";
 import type { PaintingPlan } from "../core/model.ts";
 import { createProjectWithDefaultLayout } from "../project/workspaceProfiles.ts";
@@ -30,8 +38,6 @@ import {
 import { nearestPaletteIndex, posterizePixels } from "../core/color.ts";
 import {
   generateStyledStrokes,
-  strokeStylePresets,
-  type StrokeGenerationSettings,
 } from "../core/strokes.ts";
 
 const steps = [
@@ -121,116 +127,9 @@ function drawTransformedImage(
   context.restore();
 }
 
-function drawBrushTexture(
-  context: CanvasRenderingContext2D,
-  points: readonly { x: number; y: number }[],
-  color: string,
-  widthPx: number,
-  loadLengthPx: number,
-  pressure: number,
-  strokeIndex: number,
-) {
-  const lengths = points
-    .slice(1)
-    .map((point, index) =>
-      Math.hypot(point.x - points[index].x, point.y - points[index].y),
-    );
-  const totalLength = lengths.reduce((sum, length) => sum + length, 0);
-  let travelled = 0;
-  context.lineCap = "round";
-  context.lineJoin = "round";
-  context.strokeStyle = color;
-  context.lineWidth = Math.max(1, widthPx * 0.82);
-  for (let segment = 1; segment < points.length; segment++) {
-    const from = points[segment - 1];
-    const to = points[segment];
-    const midpointDistance = travelled + lengths[segment - 1] / 2;
-    const loadRemaining = Math.max(
-      0,
-      1 - (midpointDistance % Math.max(1, loadLengthPx)) / Math.max(1, loadLengthPx),
-    );
-    const endSoftening = Math.min(
-      1,
-      Math.max(
-        0.55,
-        (totalLength - midpointDistance) / Math.max(1, widthPx * 0.9),
-      ),
-    );
-    context.globalAlpha =
-      Math.min(1, 0.72 + pressure * 0.4) *
-      Math.max(0.45, Math.min(1, loadRemaining * 4)) *
-      endSoftening;
-    context.beginPath();
-    context.moveTo(from.x, from.y);
-    context.lineTo(to.x, to.y);
-    context.stroke();
-    travelled += lengths[segment - 1];
-  }
-  travelled = 0;
-  context.fillStyle = color;
-  for (let segment = 1; segment < points.length; segment++) {
-    const from = points[segment - 1];
-    const to = points[segment];
-    const dx = to.x - from.x;
-    const dy = to.y - from.y;
-    const length = Math.hypot(dx, dy);
-    if (!length) continue;
-    const normalX = -dy / length;
-    const normalY = dx / length;
-    const samples = Math.max(1, Math.ceil(length / 1.7));
-    const bristles = Math.max(3, Math.min(22, Math.round(widthPx / 1.6)));
-    for (let sample = 0; sample <= samples; sample++) {
-      const along = (sample / samples) * length;
-      const remaining = Math.max(
-        0,
-        1 - ((travelled + along) % Math.max(1, loadLengthPx)) / Math.max(1, loadLengthPx),
-      );
-      const fade = Math.min(1, remaining * 3.2);
-      if (fade <= 0) continue;
-      for (let bristle = 0; bristle < bristles; bristle++) {
-        const noise =
-          Math.sin(
-            strokeIndex * 91.7 +
-              segment * 37.1 +
-              sample * 17.3 +
-              bristle * 53.9,
-          ) *
-            0.5 +
-          0.5;
-        if (noise > 0.5 + fade * 0.48) continue;
-        const offset =
-          ((bristle + 0.5) / bristles - 0.5) * widthPx + (noise - 0.5) * 1.8;
-        const x = from.x + (dx * sample) / samples + normalX * offset;
-        const y = from.y + (dy * sample) / samples + normalY * offset;
-        context.globalAlpha = Math.min(
-          0.22,
-          pressure * fade * (0.08 + noise * 0.14),
-        );
-        context.strokeStyle = bristle % 3 === 0 ? "#000000" : "#FFFFFF";
-        context.lineWidth = 0.35 + noise * 0.55;
-        const tangentX = dx / length;
-        const tangentY = dy / length;
-        const dashLength = 1.5 + noise * 4;
-        context.beginPath();
-        context.moveTo(
-          x - (tangentX * dashLength) / 2,
-          y - (tangentY * dashLength) / 2,
-        );
-        context.lineTo(
-          x + (tangentX * dashLength) / 2,
-          y + (tangentY * dashLength) / 2,
-        );
-        context.stroke();
-      }
-    }
-    travelled += length;
-  }
-  context.globalAlpha = 1;
-}
-
 function strokeSignature(project: CaravaiggioProject): string {
-  const { paintLoadLengthMm, ...geometrySettings } = project.strokeSettings;
-  return JSON.stringify([project.id, project.sourceImage, project.sourceTransform, project.canvas, project.palette, project.brush, geometrySettings]);
+  const { paintLoadLengthMm, paintSimulation, templateId, ...geometrySettings } = project.strokeSettings;
+  return JSON.stringify([project.id, project.sourceImage, project.sourceTransform, project.canvas, project.palette, project.brush, geometrySettings, project.posterization.medianRadiusMm]);
 }
 export function App() {
   const [generatedPlan, setGeneratedPlan] = useState<{ plan: PaintingPlan; signature: string } | null>(null);
@@ -252,14 +151,21 @@ export function App() {
   const paletteSourceCanvas = useRef<HTMLCanvasElement>(null);
   const posterizedCanvas = useRef<HTMLCanvasElement>(null);
   const strokeCanvas = useRef<HTMLCanvasElement>(null);
-  const strokePreviewCache = useRef<{ plan: PaintingPlan; project: CaravaiggioProject; painting: HTMLCanvasElement; trajectories: HTMLCanvasElement } | null>(null);
+  const strokePreviewCache = useRef<{ plan: PaintingPlan; project: CaravaiggioProject; painting?: HTMLCanvasElement; trajectories?: HTMLCanvasElement } | null>(null);
   const strokeViewport = useRef<HTMLDivElement>(null);
   const [strokeCount, setStrokeCount] = useState(0);
+  const [strokePreviewError, setStrokePreviewError] = useState("");
   const [generationRevision, setGenerationRevision] = useState(0);
   const previewSeed = useRef(crypto.randomUUID());
   const generatedPreview = useRef<{ project: CaravaiggioProject; revision: number } | null>(null);
   const [strokeZoom, setStrokeZoom] = useState(1);
   const [showTrajectories, setShowTrajectories] = useState(false);
+  const [showImportance, setShowImportance] = useState(false);
+  const [editingFocus, setEditingFocus] = useState(false);
+  const [focusRadius, setFocusRadius] = useState(.09);
+  const [eraseFocus, setEraseFocus] = useState(false);
+  const focusEditorActive = editingFocus && project.strokeSettings.strategy === "flow-curves" && !!project.strokeSettings.priority?.enabled;
+  const priorityPreview = useRef<{ width: number; height: number; values: Float32Array } | null>(null);
   const [strokeFitSize, setStrokeFitSize] = useState({
     width: 760,
     height: 520,
@@ -537,7 +443,7 @@ export function App() {
       );
       context.filter = "none";
       const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-      imageData.data.set(posterizePixels(imageData.data, project.palette));
+      imageData.data.set(posterizePixels(medianFilterPixels(imageData.data, width, height, project.canvas, project.posterization.medianRadiusMm), project.palette));
       context.putImageData(imageData, 0, 0);
     };
     image.src = project.sourceImage.dataUrl;
@@ -546,6 +452,7 @@ export function App() {
     aspect,
     project.palette,
     project.posterization,
+    project.canvas,
     project.sourceImage,
     project.sourceTransform,
   ]);
@@ -562,6 +469,7 @@ export function App() {
       previewProject.canvas.widthMm / previewProject.canvas.heightMm;
     const image = new Image();
     image.onload = () => {
+      try {
       const width =
         previewAspect >= 1 ? 240 : Math.max(1, Math.round(240 * previewAspect));
       const height =
@@ -581,6 +489,7 @@ export function App() {
         previewProject.sourceTransform,
       );
       const pixels = sourceContext.getImageData(0, 0, width, height).data;
+      const colourPixels = medianFilterPixels(pixels, width, height, previewProject.canvas, previewProject.posterization.medianRadiusMm);
       const colorMap = new Uint8Array(width * height);
       const luminance = new Float32Array(width * height);
       for (let pixel = 0; pixel < colorMap.length; pixel++) {
@@ -591,12 +500,15 @@ export function App() {
           continue;
         }
         colorMap[pixel] = nearestPaletteIndex(
-          { r: pixels[offset], g: pixels[offset + 1], b: pixels[offset + 2] },
+          { r: colourPixels[offset], g: colourPixels[offset + 1], b: colourPixels[offset + 2] },
           previewPalette,
         );
         if (previewPalette[colorMap[pixel]]?.skipPainting)
           colorMap[pixel] = 255;
       }
+      const priorityValues = detailPriorityMap({ widthPx: width, heightPx: height, paintIds: previewPalette.map(p => p.id), pixels: colorMap, luminance },
+        previewProject.canvas, previewProject.brush, previewProject.strokeSettings.strategy === "flow-curves" ? previewProject.strokeSettings.priority ?? priorityDefaults : priorityDefaults);
+      priorityPreview.current = { width, height, values: priorityValues };
       const plan = generateStyledStrokes(
         previewProject.id,
         {
@@ -605,6 +517,9 @@ export function App() {
           paintIds: previewPalette.map((color) => color.id),
           pixels: colorMap,
           luminance,
+          palette: previewPalette,
+          sourceRgba: pixels,
+          priorityMap: priorityValues,
         },
         previewProject.canvas,
         previewProject.brush,
@@ -612,9 +527,14 @@ export function App() {
       );
       generatedPreview.current = { project: previewProject, revision: generationRevision };
       setGeneratedPlan({ plan, signature: strokeSignature(previewProject) });
+      setStrokePreviewError("");
+      } catch (error) {
+        setStrokePreviewError(error instanceof Error ? error.message : "Could not generate the stroke preview.");
+      }
     };
+    image.onerror = () => setStrokePreviewError("Could not load the source image for the stroke preview.");
     image.src = sourceImage.dataUrl;
-    return () => { image.onload = null; };
+    return () => { image.onload = null; image.onerror = null; };
   }, [activeStep, generationRevision, renderedStrokeProject]);
 
   useEffect(() => {
@@ -625,8 +545,23 @@ export function App() {
     const previewPalette = previewProject.palette;
     const previewAspect = previewProject.canvas.widthMm / previewProject.canvas.heightMm;
     const plan = generatedPlan.plan;
+    setStrokeCount(plan.operations.filter(op => op.type === "stroke").length);
+    if (showImportance && priorityPreview.current) {
+      const { width, height, values } = priorityPreview.current;
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      for (let i = 0; i < values.length; i++) { const v = values[i]; rgba.set([25 + v * 230, 25 + v * 135, 30 * (1 - v), 255], i * 4); }
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d")?.putImageData(new ImageData(rgba, width, height), 0, 0);
+      const frame = requestAnimationFrame(fitStrokePreview); return () => cancelAnimationFrame(frame);
+    }
+    try {
     let cache = strokePreviewCache.current;
     if (!cache || cache.plan !== plan || cache.project !== previewProject) {
+      cache = { plan, project: previewProject };
+      strokePreviewCache.current = cache;
+    }
+    const key = showTrajectories ? "trajectories" : "painting";
+    if (!cache[key]) {
       const renderPreview = (showTrajectories: boolean) => {
       const canvas = document.createElement("canvas");
       const previewWidth = 760;
@@ -634,80 +569,52 @@ export function App() {
       canvas.height = Math.max(1, Math.round(previewWidth / previewAspect));
       const context = canvas.getContext("2d");
       if (!context) return canvas;
+      if (!showTrajectories) {
+        const { timeline, origin } = strokePreviewTimeline(plan, previewProject.canvas, previewPalette,
+          previewProject.workspace, previewProject.strokeSettings.paintLoadLengthMm ?? 120, previewProject.brush.widthMm);
+        const rasterWidth = previewAspect >= 1 ? paintPreviewLongestEdge : Math.max(1, Math.round(paintPreviewLongestEdge * previewAspect));
+        const rasterHeight = Math.max(1, Math.round(rasterWidth / previewAspect));
+        const raster = renderPaintTimeline(timeline, previewProject.canvas, previewProject.brush, previewPalette, rasterWidth, rasterHeight,
+          previewProject.strokeSettings.paintSimulation ?? paintSimulationDefaults, previewPalette.find(p => p.skipPainting)?.hex ?? "#eee8da", origin);
+        const layer = document.createElement("canvas"); layer.width = rasterWidth; layer.height = rasterHeight;
+        layer.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(raster.rgba), rasterWidth, rasterHeight), 0, 0);
+        context.drawImage(layer, 0, 0, canvas.width, canvas.height);
+        return canvas;
+      }
       context.fillStyle = "#11110f";
       context.fillRect(0, 0, canvas.width, canvas.height);
-      context.globalAlpha = showTrajectories ? 1 : 0.9;
-      context.lineCap = showTrajectories
-        ? "round"
-        : previewProject.brush.shape === "round"
-          ? "round"
-          : "square";
-      const brushWidthPx = Math.max(
-        1,
-        (previewProject.brush.widthMm /
-          Math.min(
-            previewProject.canvas.widthMm,
-            previewProject.canvas.heightMm,
-          )) *
-          Math.min(canvas.width, canvas.height),
-      );
-      context.lineWidth = showTrajectories ? 1 : brushWidthPx;
-      for (const [strokeIndex, operation] of plan.operations.entries())
-        if (operation.type === "stroke") {
-          const paint = previewPalette.find(
-            (color) => color.id === operation.paintId,
-          );
-          const previewPoints = operation.points.map((point) => ({
-            x: (point.x / previewProject.canvas.widthMm) * canvas.width,
-            y: (point.y / previewProject.canvas.heightMm) * canvas.height,
-          }));
-          if (showTrajectories) {
-            context.strokeStyle = "#E6D39B";
-            context.beginPath();
-            context.moveTo(previewPoints[0].x, previewPoints[0].y);
-            for (let index = 1; index < previewPoints.length - 1; index++) {
-              const point = previewPoints[index];
-              const next = previewPoints[index + 1];
-              context.quadraticCurveTo(
-                point.x,
-                point.y,
-                (point.x + next.x) / 2,
-                (point.y + next.y) / 2,
-              );
-            }
-            const end = previewPoints.at(-1)!;
-            context.lineTo(end.x, end.y);
-            context.stroke();
-          } else {
-            drawBrushTexture(
-              context,
-              previewPoints,
-              paint?.hex ?? "#FFFFFF",
-              brushWidthPx,
-              ((previewProject.strokeSettings.paintLoadLengthMm ?? 120) /
-                previewProject.canvas.widthMm) *
-                canvas.width,
-              operation.pressure,
-              strokeIndex,
-            );
-          }
-        }
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.lineWidth = 1;
+      context.strokeStyle = "#E6D39B";
+      for (const operation of plan.operations) if (operation.type === "stroke") {
+        context.beginPath();
+        operation.points.forEach((point, index) => {
+          const x = point.x / previewProject.canvas.widthMm * canvas.width;
+          const y = point.y / previewProject.canvas.heightMm * canvas.height;
+          if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+        });
+        context.stroke();
+      }
       return canvas;
       };
-      cache = { plan, project: previewProject, painting: renderPreview(false), trajectories: renderPreview(true) };
-      strokePreviewCache.current = cache;
+      cache[key] = renderPreview(showTrajectories);
     }
-    const preview = showTrajectories ? cache.trajectories : cache.painting;
+    const preview = cache[key]!;
     canvas.width = preview.width;
     canvas.height = preview.height;
     canvas.getContext("2d")?.drawImage(preview, 0, 0);
+      setStrokePreviewError("");
       setStrokeCount(
         plan.operations.filter((operation) => operation.type === "stroke")
           .length,
       );
       const frame = requestAnimationFrame(fitStrokePreview);
       return () => cancelAnimationFrame(frame);
-  }, [activeStep, generatedPlan, renderedStrokeProject, showTrajectories]);
+    } catch (error) {
+      setStrokePreviewError(error instanceof Error ? error.message : "Could not render the stroke preview.");
+    }
+  }, [activeStep, generatedPlan, renderedStrokeProject, showTrajectories, showImportance]);
 
   useEffect(() => {
     if (!hasUnsavedChanges) return;
@@ -769,7 +676,7 @@ export function App() {
     );
   const addPaletteColor = () =>
     setProject((current) =>
-      current.palette.length >= 8
+      current.palette.length >= maxPaletteColors
         ? current
         : {
             ...current,
@@ -796,14 +703,14 @@ export function App() {
 
   const importImage = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file || !["image/png", "image/jpeg"].includes(file.type))
-      return setMessage("Select a PNG or JPEG image.");
+    if (!file || !["image/png", "image/jpeg", "image/webp"].includes(file.type))
+      return setMessage("Select a PNG, JPEG or WebP image.");
     try {
       const sourceImage = await readImage(file);
       const photoPixels = await sampleImageColors(sourceImage);
       setProject((current) => {
         const locked = current.palette.filter(color => color.locked);
-        const suggested = imagePalette(photoPixels, current.palette.length, locked.map(color => color.hex));
+        const suggested = imagePalette(photoPixels, defaultImagePaletteSize, locked.map(color => color.hex));
         const slots = current.palette.filter(color => !color.locked);
         const palette = [...locked, ...suggested.map((hex, index) => ({
           id: slots[index]?.id ?? crypto.randomUUID(), name: `Image colour ${index + 1}`, hex,
@@ -902,6 +809,11 @@ export function App() {
       );
     }
   };
+
+  const strokePreviewStatus = `${project.strokeSettings.strategy && project.strokeSettings.strategy !== "legacy" ? strategySchemas[project.strokeSettings.strategy].name : project.strokeSettings.style[0].toUpperCase() + project.strokeSettings.style.slice(1)} variation · ${strokeCount} strokes`
+    + (generatedPlan?.plan.shadowStats ? ` · ${generatedPlan.plan.shadowStats.strokes} shadow strokes` : "")
+    + (generatedPlan?.plan.generationStats?.omittedShortStrokes ? ` · ${generatedPlan.plan.generationStats.omittedShortStrokes} strokes below Min omitted` : "")
+    + (strokeSignature(project) !== strokeSignature(renderedStrokeProject) ? " · Settings changed — Regenerate" : "");
 
   return (
     <div className="app-shell">
@@ -1045,7 +957,7 @@ export function App() {
                       >
                         <span>＋</span>
                         <strong>Select an image</strong>
-                        <small>PNG or JPEG · 3000 × 4000 px and larger</small>
+                        <small>PNG, JPEG or WebP · 3000 × 4000 px and larger</small>
                       </button>
                     )}
                   </div>
@@ -1188,10 +1100,10 @@ export function App() {
                 <div className="palette-heading">
                   <div>
                     <p className="eyebrow">Physical paints</p>
-                    <small>Active colors: {project.palette.length} / 8</small>
+                    <small>Active colors: {project.palette.length}</small>
                   </div>
                   <button
-                    disabled={project.palette.length >= 8}
+                    disabled={project.palette.length >= maxPaletteColors}
                     onClick={addPaletteColor}
                   >
                     Add color
@@ -1248,6 +1160,12 @@ export function App() {
                   ))}
                 </div>
                 <div className="poster-controls">
+                  <label className="trajectory-toggle"><input type="checkbox" checked={project.posterization.medianRadiusMm > 0}
+                    onChange={e => setProject(previous => ({ ...previous, posterization: { ...previous.posterization, medianRadiusMm: e.target.checked ? 2 : 0 } }))} /><span>Remove colour speckles · median filter</span></label>
+                  {project.posterization.medianRadiusMm > 0 && <label>Median radius · {project.posterization.medianRadiusMm} mm
+                    <input type="range" min=".5" max="8" step=".5" value={project.posterization.medianRadiusMm} onChange={e => setProject(previous => ({ ...previous, posterization: { ...previous.posterization, medianRadiusMm: Number(e.target.value) } }))} />
+                    <span className="workspace-caption">Merges tiny colour spots before palette mapping and stroke generation. Start at 2 mm; larger values remove fine features. Regenerate strokes after changes.</span>
+                  </label>}
                   <label>
                     Detail
                     <input
@@ -1309,26 +1227,27 @@ export function App() {
                 clipped to individual color regions.
               </p>
             </div>
-            <div className="stroke-settings-grid">
-              <div className="stroke-preview">
+              <div className="stroke-settings-grid">
+                <div className="stroke-preview">
+                  {strokePreviewError && <p role="alert">Preview failed: {strokePreviewError}</p>}
                 <div className="preview-toolbar">
-                  <span>
-                    {project.strokeSettings.style[0].toUpperCase() +
-                      project.strokeSettings.style.slice(1)}{" "}
-                    variation · {strokeCount} strokes
-                    {!!generatedPlan?.plan.generationStats?.omittedShortStrokes && ` · ${generatedPlan.plan.generationStats.omittedShortStrokes} strokes below Min omitted`}
-                    {strokeSignature(project) !== strokeSignature(renderedStrokeProject) && " · Settings changed — Regenerate"}
-                  </span>
+                  <span className="stroke-preview-status" title={strokePreviewStatus}>{strokePreviewStatus}</span>
                   <div className="stroke-zoom-controls">
                     <label className="trajectory-toggle">
                       <input
                         type="checkbox"
                         checked={showTrajectories}
-                        onChange={(event) =>
-                          setShowTrajectories(event.target.checked)
-                        }
+                        onChange={(event) => {
+                          setShowTrajectories(event.target.checked);
+                          setShowImportance(false);
+                        }}
                       />
                       <span>Trajectories</span>
+                    </label>
+                    <label className="trajectory-toggle">
+                      <input type="checkbox" checked={showImportance} disabled={!showImportance && (!renderedStrokeProject.strokeSettings.priority?.enabled || renderedStrokeProject.strokeSettings.strategy !== "flow-curves")}
+                        onChange={e => { setShowImportance(e.target.checked); setShowTrajectories(false); }} />
+                      <span>Importance map</span>
                     </label>
                     <button
                       onClick={() => zoomStrokePreview(strokeZoom - 0.25)}
@@ -1363,6 +1282,13 @@ export function App() {
                     </button>
                   </div>
                 </div>
+                {focusEditorActive && <div className="focus-editor-toolbar">
+                  <span>Paint focus · drag over the subject</span>
+                  <label>Brush size · {Math.round(focusRadius * 200)}%<input aria-label="Focus brush size" type="range" min=".02" max=".3" step=".01" value={focusRadius} onChange={e => setFocusRadius(Number(e.target.value))} /></label>
+                  <button type="button" className="template-action" aria-pressed={eraseFocus} onClick={() => setEraseFocus(value => !value)}>{eraseFocus ? "Eraser active" : "Erase"}</button>
+                  <button type="button" className="template-action" onClick={() => setProject(previous => ({ ...previous, strokeSettings: { ...previous.strokeSettings, priority: { ...(previous.strokeSettings.priority ?? priorityDefaults), focus: false, mask: undefined } } }))}>Clear focus</button>
+                  <button type="button" className="template-action" onClick={() => setEditingFocus(false)}>Done</button>
+                </div>}
                 {project.sourceImage ? (
                   <div
                     ref={strokeViewport}
@@ -1403,6 +1329,7 @@ export function App() {
                         height: `${strokeFitSize.height * strokeZoom}px`,
                       }}
                     >
+                      <div className="stroke-image-layer" style={{ width: strokeFitSize.width * strokeZoom, height: strokeFitSize.height * strokeZoom }}>
                       <canvas
                         ref={strokeCanvas}
                         aria-label="Generated stroke preview"
@@ -1413,6 +1340,9 @@ export function App() {
                           maxHeight: "none",
                         }}
                       />
+                      {focusEditorActive && <FocusMaskEditor settings={project.strokeSettings.priority ?? priorityDefaults} aspect={aspect} radius={focusRadius} erase={eraseFocus}
+                        onChange={priority => setProject(previous => ({ ...previous, strokeSettings: { ...previous.strokeSettings, priority } }))} />}
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -1427,6 +1357,7 @@ export function App() {
                     (1 - project.strokeSettings.overlap)
                   ).toFixed(1)}{" "}
                   mm · {project.strokeSettings.seed || "random seed"}
+                  {!!generatedPlan?.plan.shadowStats?.noDarkerPaintSeeds && " · Some shadows need a suitable darker paint in the palette"}
                 </p>
               </div>
               <aside className="settings">
@@ -1483,287 +1414,7 @@ export function App() {
                   </label>
                 </div>
                 <div className="divider" />
-                <div>
-                  <p className="eyebrow">Fill strategy</p>
-                  <label>
-                    Painting style
-                    <select
-                      value={project.strokeSettings.style}
-                      onChange={(event) => {
-                        const preset =
-                          strokeStylePresets[
-                            event.target
-                              .value as StrokeGenerationSettings["style"]
-                          ];
-                        setProject({
-                          ...project,
-                          brush: preset.brush,
-                          strokeSettings: {
-                            ...preset.settings,
-                            seed: project.strokeSettings.seed,
-                          },
-                        });
-                      }}
-                    >
-                      <option value="realism">Realism</option>
-                      <option value="impressionism">Impressionism</option>
-                      <option value="expressionism">Expressionism</option>
-                      <option value="pointillism">Pointillism</option>
-                      <option value="abstract">Abstract</option>
-                    </select>
-                  </label>
-                  <label>
-                    Variation seed
-                    <span className="seed-input-row">
-                      <input
-                        value={project.strokeSettings.seed}
-                        placeholder="Blank creates a new variant each time"
-                        onChange={(event) =>
-                          setProject({
-                            ...project,
-                            strokeSettings: {
-                              ...project.strokeSettings,
-                              seed: event.target.value,
-                            },
-                          })
-                        }
-                      />
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setProject({
-                            ...project,
-                            strokeSettings: {
-                              ...project.strokeSettings,
-                              seed: crypto.randomUUID().slice(0, 8),
-                            },
-                          })
-                        }
-                      >
-                        New
-                      </button>
-                    </span>
-                  </label>
-                  <label>
-                    Direction
-                    <select
-                      value={project.strokeSettings.direction}
-                      onChange={(event) =>
-                        setProject({
-                          ...project,
-                          strokeSettings: {
-                            ...project.strokeSettings,
-                            direction: event.target
-                              .value as StrokeGenerationSettings["direction"],
-                          },
-                        })
-                      }
-                    >
-                      <option value="horizontal">Horizontal</option>
-                      <option value="vertical">Vertical</option>
-                      <option value="random">Random</option>
-                      <option value="flow">Region flow</option>
-                      <option value="image-contours">Image contours (Canny)</option>
-                    </select>
-                  </label>
-                  {project.strokeSettings.direction === "image-contours" && <>
-                    <p className="workspace-caption">Fill regions first, then draw image contours with the selected brush. Short contours below Min are omitted.</p>
-                    {([
-                      ["contourSmoothing", "Smoothing", 0, 1, 0.05, 0.5],
-                      ["contourSensitivity", "Edge sensitivity", 0, 1, 0.05, 0.5],
-                      ["contourGapMm", "Connect gaps · mm", 0, 10, 0.5, 2],
-                    ] as const).map(([key, label, min, max, step, fallback]) => <label key={key}>
-                      {label} · {project.strokeSettings[key] ?? fallback}
-                      <input type="range" min={min} max={max} step={step} value={project.strokeSettings[key] ?? fallback}
-                        onChange={event => setProject({ ...project, strokeSettings: { ...project.strokeSettings, [key]: Number(event.target.value) } })} />
-                    </label>)}
-                  </>}
-                  <label>
-                    Stroke geometry
-                    <select
-                      value={project.strokeSettings.geometry}
-                      onChange={(event) =>
-                        setProject({
-                          ...project,
-                          strokeSettings: {
-                            ...project.strokeSettings,
-                            geometry: event.target
-                              .value as StrokeGenerationSettings["geometry"],
-                          },
-                        })
-                      }
-                    >
-                      <option value="linear">Linear</option>
-                      <option value="curved">Curved</option>
-                      <option value="contour">Contour</option>
-                      <option value="mixed">Mixed</option>
-                    </select>
-                  </label>
-                  {project.strokeSettings.geometry !== "linear" &&
-                    project.strokeSettings.geometry !== "contour" && (
-                      <label>
-                        Curvature ·{" "}
-                        {Math.round(project.strokeSettings.curvature * 100)}%
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={project.strokeSettings.curvature * 100}
-                          onChange={(event) =>
-                            setProject({
-                              ...project,
-                              strokeSettings: {
-                                ...project.strokeSettings,
-                                curvature: Number(event.target.value) / 100,
-                              },
-                            })
-                          }
-                        />
-                      </label>
-                    )}
-                  <label>
-                    Overlap · {Math.round(project.strokeSettings.overlap * 100)}
-                    %
-                    <input
-                      type="range"
-                      min="0"
-                      max="80"
-                      value={project.strokeSettings.overlap * 100}
-                      onChange={(event) =>
-                        setProject({
-                          ...project,
-                          strokeSettings: {
-                            ...project.strokeSettings,
-                            overlap: Number(event.target.value) / 100,
-                          },
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    Speed · {project.strokeSettings.speedMmPerMin} mm/min
-                    <input
-                      type="range"
-                      min="100"
-                      max="2000"
-                      step="50"
-                      value={project.strokeSettings.speedMmPerMin}
-                      onChange={(event) =>
-                        setProject({
-                          ...project,
-                          strokeSettings: {
-                            ...project.strokeSettings,
-                            speedMmPerMin: Number(event.target.value),
-                          },
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    Pressure ·{" "}
-                    {Math.round(project.strokeSettings.pressure * 100)}%
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      value={project.strokeSettings.pressure * 100}
-                      onChange={(event) =>
-                        setProject({
-                          ...project,
-                          strokeSettings: {
-                            ...project.strokeSettings,
-                            pressure: Number(event.target.value) / 100,
-                          },
-                        })
-                      }
-                    />
-                  </label>
-                  <div className="stroke-length-range">
-                    <p>Stroke length</p><p className="workspace-caption">Min and Max apply to the full trajectory. Areas too small for Min are omitted; lower Min to retain those details.</p>
-                    <label className="trajectory-toggle"><input type="checkbox"
-                      checked={project.strokeSettings.joinNearbyStrokes !== false}
-                      disabled={project.strokeSettings.style === "pointillism"}
-                      onChange={event => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, joinNearbyStrokes: event.target.checked } }))} />
-                      Connect nearby strokes of the same colour
-                    </label>
-                    <label>
-                      Min ·{" "}
-                      {Math.round(
-                        project.strokeSettings.minStrokeLengthMm ?? 12,
-                      )}{" "}
-                      mm
-                      <input
-                        type="range"
-                        min="1"
-                        max="200"
-                        step="1"
-                        value={project.strokeSettings.minStrokeLengthMm ?? 12}
-                        onChange={(event) => {
-                          const value = Number(event.target.value);
-                          setProject({
-                            ...project,
-                            strokeSettings: {
-                              ...project.strokeSettings,
-                              minStrokeLengthMm: value,
-                              maxStrokeLengthMm: Math.max(
-                                value,
-                                project.strokeSettings.maxStrokeLengthMm ?? 75,
-                              ),
-                            },
-                          });
-                        }}
-                      />
-                    </label>
-                    <label>
-                      Max ·{" "}
-                      {Math.round(
-                        project.strokeSettings.maxStrokeLengthMm ?? 75,
-                      )}{" "}
-                      mm
-                      <input
-                        type="range"
-                        min="1"
-                        max="300"
-                        step="1"
-                        value={project.strokeSettings.maxStrokeLengthMm ?? 75}
-                        onChange={(event) => {
-                          const value = Number(event.target.value);
-                          setProject({
-                            ...project,
-                            strokeSettings: {
-                              ...project.strokeSettings,
-                              minStrokeLengthMm: Math.min(
-                                value,
-                                project.strokeSettings.minStrokeLengthMm ?? 12,
-                              ),
-                              maxStrokeLengthMm: value,
-                            },
-                          });
-                        }}
-                      />
-                    </label>
-                  </div>
-                  <label>
-                    Paint load length ·{" "}
-                    {project.strokeSettings.paintLoadLengthMm ?? 120} mm
-                    <input
-                      type="range"
-                      min="10"
-                      max="500"
-                      step="10"
-                      value={project.strokeSettings.paintLoadLengthMm ?? 120}
-                      onChange={(event) =>
-                        setProject({
-                          ...project,
-                          strokeSettings: {
-                            ...project.strokeSettings,
-                            paintLoadLengthMm: Number(event.target.value),
-                          },
-                        })
-                      }
-                    />
-                  </label>
-                </div>
+                <StrokeTemplatePanel project={project} onChange={setProject} editingFocus={focusEditorActive} onEditFocus={() => { setEditingFocus(value => !value); setShowImportance(false); setShowTrajectories(false); }} />
               </aside>
             </div>
             <div className="flow-actions">
@@ -1780,7 +1431,7 @@ export function App() {
             onChange={workspace => setProject(current => ({ ...current, workspace }))}
             onBack={() => setActiveStep(2)} onNext={() => goToStep(4)} />
         ) : activeStep === 4 ? (
-          <Simulation project={project} onCapacityChange={paintLoadLengthMm => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, paintLoadLengthMm } }))}
+          <Simulation project={project} onPaintSimulationChange={paintSimulation => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, paintSimulation } }))} onCapacityChange={paintLoadLengthMm => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, paintLoadLengthMm } }))}
             plan={generatedPlan?.signature === strokeSignature(project) ? generatedPlan.plan : null}
             onBack={() => setActiveStep(3)} onRegenerate={() => goToStep(2)} onNext={() => goToStep(5)} />
         ) : (
@@ -1859,7 +1510,7 @@ export function App() {
         hidden
         ref={imageInput}
         type="file"
-        accept="image/png,image/jpeg"
+        accept="image/png,image/jpeg,image/webp"
         onChange={importImage}
       />
       <input

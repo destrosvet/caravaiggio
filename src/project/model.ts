@@ -1,4 +1,10 @@
 import { defaultWorkspace, parseWorkspace, syncWorkspace, type Workspace } from "../core/workspace.ts";
+import { strategyParameters, type StrategyId } from "../core/strategySchema.ts";
+import { validatePaintSimulation } from "../core/paintRaster.ts";
+import { applyStrokeTemplate, paintingStyleTemplates } from "../core/strokeTemplates.ts";
+import { maxPaletteColors } from "../core/paletteLimits.ts";
+import { validateShadows } from "../core/shadows.ts";
+import { validatePriority } from "../core/priority.ts";
 export type CanvasSettings = Readonly<{
   widthMm: number;
   heightMm: number;
@@ -8,7 +14,7 @@ export type CanvasSettings = Readonly<{
 
 export type SourceImage = Readonly<{
   name: string;
-  mimeType: "image/png" | "image/jpeg";
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
   widthPx: number;
   heightPx: number;
   dataUrl: string;
@@ -29,6 +35,7 @@ export type PosterizationSettings = Readonly<{
   detail: number;
   smoothing: number;
   minimumRegionPx: number;
+  medianRadiusMm: number;
 }>;
 
 export type SourceTransform = Readonly<{
@@ -52,7 +59,7 @@ type CaravaiggioProjectV1 = Readonly<{
 
 export type CaravaiggioProject = Readonly<
   Omit<CaravaiggioProjectV1, "version" | "canvas"> & {
-    version: 8;
+    version: 14;
     canvas: CanvasSettings;
     palette: readonly PaletteColor[];
     workspace: Workspace;
@@ -74,7 +81,7 @@ function validateImage(value: unknown): SourceImage | null {
     throw new Error("The project contains an invalid source image.");
   if (
     typeof value.name !== "string" ||
-    !["image/png", "image/jpeg"].includes(String(value.mimeType))
+    !["image/png", "image/jpeg", "image/webp"].includes(String(value.mimeType))
   )
     throw new Error("The project contains an unsupported source image type.");
   if (
@@ -127,7 +134,7 @@ function normalize(value: Record<string, unknown>): CaravaiggioProject {
       value.version === 4 ||
       value.version === 5 ||
       value.version === 6 ||
-      value.version === 7 || value.version === 8) &&
+      value.version === 7 || value.version === 8 || value.version === 9 || value.version === 10 || value.version === 11 || value.version === 12 || value.version === 13 || value.version === 14) &&
     data.canvas.units !== "mm"
   )
     throw new Error("The project uses unsupported units.");
@@ -152,7 +159,7 @@ function normalize(value: Record<string, unknown>): CaravaiggioProject {
         : defaultSourceTransform();
   return {
     format: "caravaiggio-project",
-    version: 8,
+    version: 14,
     id: data.id,
     name: data.name,
     createdAt: data.createdAt,
@@ -221,15 +228,15 @@ function defaultPalette(): readonly PaletteColor[] {
 }
 
 function defaultPosterization(): PosterizationSettings {
-  return { detail: 50, smoothing: 20, minimumRegionPx: 24 };
+  return { detail: 50, smoothing: 20, minimumRegionPx: 24, medianRadiusMm: 0 };
 }
 
 function validatePalette(
   value: unknown,
   version: number,
 ): readonly PaletteColor[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 8)
-    throw new Error("The palette must contain between 1 and 8 colors.");
+  if (!Array.isArray(value) || value.length < 1 || value.length > maxPaletteColors)
+    throw new Error(`The palette must contain between 1 and ${maxPaletteColors} colors.`);
   const ids = new Set<string>();
   return value.map((entry) => {
     if (
@@ -283,13 +290,15 @@ function validatePosterization(value: unknown): PosterizationSettings {
     value.smoothing > 100 ||
     typeof value.minimumRegionPx !== "number" ||
     !Number.isInteger(value.minimumRegionPx) ||
-    value.minimumRegionPx < 0
+    value.minimumRegionPx < 0 ||
+    (value.medianRadiusMm !== undefined && (typeof value.medianRadiusMm !== "number" || !Number.isFinite(value.medianRadiusMm) || value.medianRadiusMm < 0 || value.medianRadiusMm > 8))
   )
     throw new Error("The project contains invalid posterization settings.");
   return {
     detail: value.detail,
     smoothing: value.smoothing,
     minimumRegionPx: value.minimumRegionPx,
+    medianRadiusMm: value.medianRadiusMm ?? 0,
   } as PosterizationSettings;
 }
 
@@ -313,7 +322,7 @@ const defaultStrokeSettings = (): StrokeGenerationSettings => ({
   pressure: 0.5,
 });
 
-function validateBrush(value: unknown): BrushProfile {
+export function validateBrush(value: unknown): BrushProfile {
   if (
     !record(value) ||
     typeof value.name !== "string" ||
@@ -325,17 +334,19 @@ function validateBrush(value: unknown): BrushProfile {
   return value as BrushProfile;
 }
 
-function validateStrokeSettings(value: unknown): StrokeGenerationSettings {
+export function validateStrokeSettings(value: unknown): StrokeGenerationSettings {
   if (
     !record(value) ||
     !["horizontal", "vertical", "random", "flow", "image-contours"].includes(
       String(value.direction),
     ) ||
     typeof value.overlap !== "number" ||
+    !Number.isFinite(value.overlap) ||
     value.overlap < 0 ||
     value.overlap >= 1 ||
     !positive(value.speedMmPerMin) ||
     typeof value.pressure !== "number" ||
+    !Number.isFinite(value.pressure) ||
     value.pressure < 0 ||
     value.pressure > 1
   )
@@ -387,6 +398,10 @@ function validateStrokeSettings(value: unknown): StrokeGenerationSettings {
     value.maxStrokeLengthMm <= 500
       ? value.maxStrokeLengthMm
       : strokeLengthMm;
+  const strategy = value.strategy === undefined ? "legacy" : value.strategy as StrategyId;
+  if (!["legacy", "flow-curves", "curved-offsets", "dabs", "decorative-lines"].includes(strategy)) throw new Error("Unsupported trajectory strategy.");
+  const parameters = strategyParameters(strategy, value.strategyParameters ?? {});
+  if (value.templateId !== undefined && (typeof value.templateId !== "string" || !value.templateId.trim())) throw new Error("Invalid template identity.");
   return {
     ...value,
     style,
@@ -397,6 +412,11 @@ function validateStrokeSettings(value: unknown): StrokeGenerationSettings {
     minStrokeLengthMm,
     maxStrokeLengthMm,
     paintLoadLengthMm,
+    strategy,
+    strategyParameters: parameters,
+    paintSimulation: validatePaintSimulation(value.paintSimulation),
+    shadows: validateShadows(value.shadows),
+    priority: validatePriority(value.priority),
     contourSmoothing: typeof value.contourSmoothing === "number" && Number.isFinite(value.contourSmoothing) ? Math.max(0, Math.min(1, value.contourSmoothing)) : 0.5,
     contourSensitivity: typeof value.contourSensitivity === "number" && Number.isFinite(value.contourSensitivity) ? Math.max(0, Math.min(1, value.contourSensitivity)) : 0.5,
     contourGapMm: typeof value.contourGapMm === "number" && Number.isFinite(value.contourGapMm) ? Math.max(0, Math.min(10, value.contourGapMm)) : 2,
@@ -450,7 +470,7 @@ export function createProject(name = "New painting"): CaravaiggioProject {
   const now = new Date().toISOString();
   return {
     format: "caravaiggio-project",
-    version: 8,
+    version: 14,
     id: crypto.randomUUID(),
     name,
     createdAt: now,
@@ -465,8 +485,7 @@ export function createProject(name = "New painting"): CaravaiggioProject {
     palette: defaultPalette(),
     workspace: syncWorkspace(defaultWorkspace({ widthMm: 300, heightMm: 400 }), { widthMm: 300, heightMm: 400 }, defaultPalette()),
     posterization: defaultPosterization(),
-    brush: defaultBrush(),
-    strokeSettings: defaultStrokeSettings(),
+    ...applyStrokeTemplate(paintingStyleTemplates[0], ""),
     sourceTransform: defaultSourceTransform(),
   };
 }
@@ -480,7 +499,7 @@ export function parseProject(input: string): CaravaiggioProject {
   }
   if (!record(value) || value.format !== "caravaiggio-project")
     throw new Error("The file does not contain a valid project.");
-  if (![1, 2, 3, 4, 5, 6, 7, 8].includes(Number(value.version)))
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].includes(Number(value.version)))
     throw new Error("Unsupported project format or version.");
   return normalize(value);
 }
