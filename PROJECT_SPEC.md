@@ -571,3 +571,7 @@ První verze je dokončená, pokud uživatel dokáže bez ručního zásahu do m
 ## 21. Správa tohoto dokumentu
 
 Tento soubor je hlavní zdroj pravdy pro rozsah a směr projektu. Nová důležitá rozhodnutí se doplní sem, případně do navazujících technických rozhodnutí v adresáři `docs/adr/`. Změna zadání má obsahovat datum, důvod a dopad na milníky.
+
+## 22. Rozhodnutí – dráhy stroje (11. října 2026)
+
+Fáze M6 navazuje na hotové malířské tahy samostatným plánem pohybů XYZ. Stejný plán používá simulace a export GRBL. Nabírání barvy, mytí a otírání jsou nastavitelné sekvence bodů XYZ, prodlev a opakování uložené u konkrétních zón v Pracovišti; přenášejí se i s profily fyzických nádobek. Přejezdy probíhají nad nejvyšší nastavenou úrovní okraje a obcházejí zakázané zóny s rezervou pro šířku štětce. Export obsahuje suchý běh a blokuje neplatné či neproveditelné dráhy. Zatím je podporován stroj XYZ s kladným směrem Z nahoru; servo, streamování a fyzická kalibrace zůstávají dalšími kroky. Podrobnosti: [docs/M6.md](docs/M6.md).

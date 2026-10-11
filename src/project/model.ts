@@ -1,3 +1,4 @@
+import { validateAiPosterization, type AiPosterizationSettings } from "../core/aiPosterization.ts";
 import { defaultWorkspace, parseWorkspace, syncWorkspace, type Workspace } from "../core/workspace.ts";
 import { strategyParameters, type StrategyId } from "../core/strategySchema.ts";
 import { validatePaintSimulation } from "../core/paintRaster.ts";
@@ -21,6 +22,7 @@ export type SourceImage = Readonly<{
 }>;
 
 export type PaletteColor = Readonly<{
+  autoFaceShade?: boolean;
   id: string;
   name: string;
   hex: `#${string}`;
@@ -32,6 +34,8 @@ export type PaletteColor = Readonly<{
 }>;
 
 export type PosterizationSettings = Readonly<{
+  method?: "classic" | "sam3";
+  ai?: AiPosterizationSettings;
   detail: number;
   smoothing: number;
   minimumRegionPx: number;
@@ -251,6 +255,7 @@ function validatePalette(
       typeof entry.locked !== "boolean"
     )
       throw new Error("The project contains an invalid palette color.");
+    if (entry.autoFaceShade !== undefined && typeof entry.autoFaceShade !== "boolean") throw Error("Invalid automatic face shade.");
     ids.add(entry.id);
     const restricted = version >= 4 ? entry.restricted : false;
     const skipPainting =
@@ -268,6 +273,7 @@ function validatePalette(
     )
       throw new Error("The project contains invalid palette matching rules.");
     return {
+      ...(entry.autoFaceShade !== undefined ? {autoFaceShade: entry.autoFaceShade} : {}),
       id: entry.id,
       name: entry.name,
       hex: entry.hex.toUpperCase() as `#${string}`,
@@ -280,6 +286,10 @@ function validatePalette(
   });
 }
 
+function validatePosterizationMethod(value:unknown): "classic"|"sam3" {
+  if(value!=="classic" && value!=="sam3")throw Error("Invalid posterization method.");
+  return value;
+}
 function validatePosterization(value: unknown): PosterizationSettings {
   if (
     !record(value) ||
@@ -299,6 +309,8 @@ function validatePosterization(value: unknown): PosterizationSettings {
     smoothing: value.smoothing,
     minimumRegionPx: value.minimumRegionPx,
     medianRadiusMm: value.medianRadiusMm ?? 0,
+    ...(value.method!==undefined ? {method:validatePosterizationMethod(value.method)} : {}),
+    ...(value.ai!==undefined ? {ai:validateAiPosterization(value.ai)} : {}),
   } as PosterizationSettings;
 }
 

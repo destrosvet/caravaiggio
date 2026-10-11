@@ -34,3 +34,10 @@ export async function saveNativeProject(contents: string, suggestedName: string)
   await writeTextFile(path, contents);
   return path;
 }
+
+export async function saveNativeGcode(contents: string, suggestedName: string): Promise<string | null> {
+  const path = await save({ defaultPath: suggestedName, filters: [{ name: "GRBL G-code", extensions: ["gcode", "nc"] }] });
+  if (!path) return null;
+  await writeTextFile(path, contents);
+  return path;
+}

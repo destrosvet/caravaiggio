@@ -1,12 +1,19 @@
+import {runCalculation,calculationProject} from "../platform/runCalculation.ts";
+import {CalculationProgress} from "./CalculationProgress.tsx";
+import { AiPosterizationControls } from "./AiPosterizationControls.tsx";
+import { analyzeWithSam3 } from "../platform/sam3.ts";
+import { AI_POSTERIZATION_VERSION, defaultAiPosterizationSettings, prepareAiPosterization, type AiImportanceMask } from "../core/aiPosterization.ts";
+import { StrokeAnalytics } from "./StrokeAnalytics.tsx";
+import type { MachinePlanSnapshot } from "../core/machineProgram.ts";
+import { MachineExport } from "./MachineExport.tsx";
 import { StrokeTemplatePanel } from "./StrokeTemplatePanel.tsx";
 import { FocusMaskEditor } from "./FocusMaskEditor.tsx";
 import { medianFilterPixels } from "../core/medianFilter.ts";
-import { renderPaintTimeline, paintSimulationDefaults, paintPreviewLongestEdge } from "../core/paintRaster.ts";
-import { strokePreviewTimeline } from "../core/strokePreview.ts";
 import { strategySchemas } from "../core/strategySchema.ts";
+import { facePalette } from "../core/facePalette.ts";
 import { imagePalette } from "../core/imagePalette.ts";
 import { defaultImagePaletteSize, maxPaletteColors } from "../core/paletteLimits.ts";
-import { detailPriorityMap, priorityDefaults } from "../core/priority.ts";
+import { priorityDefaults } from "../core/priority.ts";
 import { Simulation } from "./Simulation.tsx";
 import type { PaintingPlan } from "../core/model.ts";
 import { createProjectWithDefaultLayout } from "../project/workspaceProfiles.ts";
@@ -35,9 +42,9 @@ import {
   openNativeProject,
   saveNativeProject,
 } from "../platform/projectFiles.ts";
-import { nearestPaletteIndex, posterizePixels } from "../core/color.ts";
+import { posterizePixels } from "../core/color.ts";
 import {
-  generateStyledStrokes,
+  type ColorRegionMap,
 } from "../core/strokes.ts";
 
 const steps = [
@@ -48,28 +55,6 @@ const steps = [
   "Simulation",
   "Export",
 ];
-const plannedSteps = [
-  {
-    title: "Generate paintable strokes.",
-    description:
-      "Configure the brush and convert color regions into executable stroke paths.",
-  },
-  {
-    title: "Arrange the machine workspace.",
-    description:
-      "Position the canvas, paint containers, water, wiping area, and safe travel zones.",
-  },
-  {
-    title: "Inspect the painting simulation.",
-    description:
-      "Preview stroke order, tool movement, paint usage, and the expected result.",
-  },
-  {
-    title: "Validate and export.",
-    description: "Run safety checks and create machine-ready GRBL G-code.",
-  },
-];
-
 function readImage(file: File): Promise<SourceImage> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -129,10 +114,11 @@ function drawTransformedImage(
 
 function strokeSignature(project: CaravaiggioProject): string {
   const { paintLoadLengthMm, paintSimulation, templateId, ...geometrySettings } = project.strokeSettings;
-  return JSON.stringify([project.id, project.sourceImage, project.sourceTransform, project.canvas, project.palette, project.brush, geometrySettings, project.posterization.medianRadiusMm]);
+  return JSON.stringify([project.id, project.sourceImage, project.sourceTransform, project.canvas, project.palette, project.brush, geometrySettings, project.posterization.medianRadiusMm, project.posterization.method ?? "classic", project.posterization.method === "sam3" ? [AI_POSTERIZATION_VERSION, project.posterization.ai ?? defaultAiPosterizationSettings] : null]);
 }
 export function App() {
-  const [generatedPlan, setGeneratedPlan] = useState<{ plan: PaintingPlan; signature: string } | null>(null);
+  const [generatedPlan, setGeneratedPlan] = useState<{ plan: PaintingPlan; signature: string; regionMap: ColorRegionMap } | null>(null);
+  const [machinePaths, setMachinePaths] = useState<MachinePlanSnapshot | null>(null);
   const [editingColorId, setEditingColorId] = useState<string | null>(null);
   const initialProject = useRef(createProjectWithDefaultLayout());
   const [project, setProject] = useState<CaravaiggioProject>(
@@ -140,11 +126,20 @@ export function App() {
   );
   const [renderedStrokeProject, setRenderedStrokeProject] =
     useState<CaravaiggioProject>(initialProject.current);
+  const [aiResult,setAiResult]=useState<{key:string;status:"loading"|"ready"|"error";mask?:AiImportanceMask;error?:string}|null>(null);
+  const [aiRetry,setAiRetry]=useState(0);
+  const [palettePreviewProject,setPalettePreviewProject]=useState<CaravaiggioProject|null>(null);
+  const aiCache=useRef(new Map<string,AiImportanceMask>());
   const [cleanSnapshot, setCleanSnapshot] = useState(() =>
     JSON.stringify(initialProject.current),
   );
   const [message, setMessage] = useState("Project is ready");
   const [activeStep, setActiveStep] = useState(0);
+  const aiProject=activeStep===2 ? renderedStrokeProject : project;
+  const aiKey=useMemo(()=>JSON.stringify([AI_POSTERIZATION_VERSION,aiProject.sourceImage?.dataUrl,aiProject.sourceTransform,aiProject.canvas.widthMm,aiProject.canvas.heightMm]),[aiProject.sourceImage,aiProject.sourceTransform,aiProject.canvas.widthMm,aiProject.canvas.heightMm]);
+  const aiMask=aiResult?.key===aiKey && aiResult.status==="ready" ? aiResult.mask : undefined;
+  const aiMode=(aiProject.posterization.method??"classic")==="sam3";
+
   const [highestUnlockedStep, setHighestUnlockedStep] = useState(0);
   const imageInput = useRef<HTMLInputElement>(null);
   const projectInput = useRef<HTMLInputElement>(null);
@@ -156,6 +151,9 @@ export function App() {
   const [strokeCount, setStrokeCount] = useState(0);
   const [strokePreviewError, setStrokePreviewError] = useState("");
   const [generationRevision, setGenerationRevision] = useState(0);
+  const [generationProgress,setGenerationProgress]=useState<string|null>(null);
+  const [previewProgress,setPreviewProgress]=useState<string|null>(null);
+  const strokeProgress=generationProgress??previewProgress;
   const previewSeed = useRef(crypto.randomUUID());
   const generatedPreview = useRef<{ project: CaravaiggioProject; revision: number } | null>(null);
   const [strokeZoom, setStrokeZoom] = useState(1);
@@ -391,6 +389,31 @@ export function App() {
     setProject((current) => ({ ...current, sourceTransform }));
   };
 
+  useEffect(()=>{
+    if(!aiMode || !aiProject.sourceImage || (activeStep!==1 && activeStep!==2))return;
+    const cached=aiCache.current.get(aiKey);
+    if(cached){setAiResult({key:aiKey,status:"ready",mask:cached});return;}
+    const controller=new AbortController();
+    const image=new Image();
+    setAiResult({key:aiKey,status:"loading"});
+    image.onload=()=>{
+      const aspect=aiProject.canvas.widthMm/aiProject.canvas.heightMm;
+      const width=aspect>=1?900:Math.max(1,Math.round(900*aspect)),height=aspect>=1?Math.max(1,Math.round(900/aspect)):900;
+      const surface=document.createElement("canvas");surface.width=width;surface.height=height;
+      const context=surface.getContext("2d",{willReadFrequently:true});
+      if(!context){setAiResult({key:aiKey,status:"error",error:"Image analysis is unavailable."});return;}
+      drawTransformedImage(context,image,width,height,aiProject.sourceTransform);
+      void analyzeWithSam3(context.getImageData(0,0,width,height).data,width,height,controller.signal).then(mask=>{
+        if(controller.signal.aborted)return;
+        if(aiCache.current.size>=3)aiCache.current.delete(aiCache.current.keys().next().value!);
+        aiCache.current.set(aiKey,mask);setAiResult({key:aiKey,status:"ready",mask});
+      }).catch(error=>{if(!controller.signal.aborted)setAiResult({key:aiKey,status:"error",error:error instanceof Error?error.message:"SAM 3 analysis failed."});});
+    };
+    image.onerror=()=>setAiResult({key:aiKey,status:"error",error:"Could not load the image for AI analysis."});
+    const timer=setTimeout(()=>{image.src=aiProject.sourceImage!.dataUrl;},300);
+    return ()=>{clearTimeout(timer);controller.abort();image.onload=null;image.onerror=null;};
+  },[activeStep,aiMode,aiKey,aiRetry]);
+
   useEffect(() => {
     const canvas = posterizedCanvas.current;
     const sourceCanvas = paletteSourceCanvas.current;
@@ -398,7 +421,7 @@ export function App() {
       return;
     const image = new Image();
     image.onload = () => {
-      const detailScale = 0.2 + project.posterization.detail / 125;
+      const detailScale = project.posterization.method === "sam3" ? 1 : 0.2 + project.posterization.detail / 125;
       const longestEdge = Math.max(
         1,
         Math.round(
@@ -431,7 +454,7 @@ export function App() {
         );
       const context = canvas.getContext("2d", { willReadFrequently: true });
       if (!context) return;
-      context.filter = project.posterization.smoothing
+      context.filter = project.posterization.method !== "sam3" && project.posterization.smoothing
         ? `blur(${project.posterization.smoothing / 40}px)`
         : "none";
       drawTransformedImage(
@@ -443,10 +466,20 @@ export function App() {
       );
       context.filter = "none";
       const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-      imageData.data.set(posterizePixels(medianFilterPixels(imageData.data, width, height, project.canvas, project.posterization.medianRadiusMm), project.palette));
+      if(project.posterization.method==="sam3" && !aiMask){context.clearRect(0,0,width,height);return;}
+      const shadeCount=project.posterization.method === "sam3" ? project.posterization.ai?.faceShadeCount ?? 0 : 0;
+      const palette=facePalette(imageData.data,width,height,aiMask,project.palette,shadeCount);
+      if(JSON.stringify(palette)!==JSON.stringify(project.palette)) {
+        setProject(current=>current.palette===project.palette && current.posterization===project.posterization && current.sourceImage===project.sourceImage && current.sourceTransform===project.sourceTransform && current.canvas===project.canvas ? {...current,palette} : current);
+        return;
+      }
+      const prepared=project.posterization.method==="sam3" ? prepareAiPosterization(imageData.data,width,height,project.canvas,aiMask!,project.posterization.ai??defaultAiPosterizationSettings) : medianFilterPixels(imageData.data, width, height, project.canvas, project.posterization.medianRadiusMm);
+      imageData.data.set(posterizePixels(prepared, project.palette));
       context.putImageData(imageData, 0, 0);
+      setPalettePreviewProject(project);
     };
     image.src = project.sourceImage.dataUrl;
+    return () => { image.onload = null; image.onerror = null; };
   }, [
     activeStep,
     aspect,
@@ -455,32 +488,34 @@ export function App() {
     project.canvas,
     project.sourceImage,
     project.sourceTransform,
+    aiMask,
   ]);
 
   useEffect(() => {
     const canvas = strokeCanvas.current;
     const sourceImage = renderedStrokeProject.sourceImage;
-    if (activeStep !== 2 || !canvas || !sourceImage) return;
+    if (activeStep !== 2 || !canvas || !sourceImage) {setGenerationProgress(null);return;}
     if (generatedPreview.current?.project === renderedStrokeProject &&
-        generatedPreview.current.revision === generationRevision) return;
+        generatedPreview.current.revision === generationRevision && generatedPlan?.regionMap) return;
+    if(renderedStrokeProject.posterization.method==="sam3" && !aiMask){setGenerationProgress(null);setStrokePreviewError(aiResult?.status==="error"?aiResult.error??"AI analysis failed.":"Waiting for local SAM 3 analysis.");return;}
+    const controller=new AbortController();
+    setGenerationProgress("Loading the source image…");
     const previewProject = renderedStrokeProject;
-    const previewPalette = previewProject.palette;
     const previewAspect =
       previewProject.canvas.widthMm / previewProject.canvas.heightMm;
     const image = new Image();
-    image.onload = () => {
+    image.onload = async () => {
       try {
-      const width =
-        previewAspect >= 1 ? 240 : Math.max(1, Math.round(240 * previewAspect));
-      const height =
-        previewAspect >= 1 ? Math.max(1, Math.round(240 / previewAspect)) : 240;
+      const resolution=previewProject.posterization.method==="sam3" ? 480 : 240;
+      const width = previewAspect >= 1 ? resolution : Math.max(1,Math.round(resolution*previewAspect));
+      const height = previewAspect >= 1 ? Math.max(1,Math.round(resolution/previewAspect)) : resolution;
       const sourceCanvas = document.createElement("canvas");
       sourceCanvas.width = width;
       sourceCanvas.height = height;
       const sourceContext = sourceCanvas.getContext("2d", {
         willReadFrequently: true,
       });
-      if (!sourceContext) return;
+      if (!sourceContext) throw Error("Image processing is unavailable.");
       drawTransformedImage(
         sourceContext,
         image,
@@ -489,57 +524,29 @@ export function App() {
         previewProject.sourceTransform,
       );
       const pixels = sourceContext.getImageData(0, 0, width, height).data;
-      const colourPixels = medianFilterPixels(pixels, width, height, previewProject.canvas, previewProject.posterization.medianRadiusMm);
-      const colorMap = new Uint8Array(width * height);
-      const luminance = new Float32Array(width * height);
-      for (let pixel = 0; pixel < colorMap.length; pixel++) {
-        const offset = pixel * 4;
-        luminance[pixel] = (0.2126 * pixels[offset] + 0.7152 * pixels[offset + 1] + 0.0722 * pixels[offset + 2]) / 255;
-        if (pixels[offset + 3] < 16) {
-          colorMap[pixel] = 255;
-          continue;
-        }
-        colorMap[pixel] = nearestPaletteIndex(
-          { r: colourPixels[offset], g: colourPixels[offset + 1], b: colourPixels[offset + 2] },
-          previewPalette,
-        );
-        if (previewPalette[colorMap[pixel]]?.skipPainting)
-          colorMap[pixel] = 255;
-      }
-      const priorityValues = detailPriorityMap({ widthPx: width, heightPx: height, paintIds: previewPalette.map(p => p.id), pixels: colorMap, luminance },
-        previewProject.canvas, previewProject.brush, previewProject.strokeSettings.strategy === "flow-curves" ? previewProject.strokeSettings.priority ?? priorityDefaults : priorityDefaults);
-      priorityPreview.current = { width, height, values: priorityValues };
-      const plan = generateStyledStrokes(
-        previewProject.id,
-        {
-          widthPx: width,
-          heightPx: height,
-          paintIds: previewPalette.map((color) => color.id),
-          pixels: colorMap,
-          luminance,
-          palette: previewPalette,
-          sourceRgba: pixels,
-          priorityMap: priorityValues,
-        },
-        previewProject.canvas,
-        previewProject.brush,
-        { ...previewProject.strokeSettings, seed: previewProject.strokeSettings.seed.trim() || previewSeed.current },
-      );
-      generatedPreview.current = { project: previewProject, revision: generationRevision };
-      setGeneratedPlan({ plan, signature: strokeSignature(previewProject) });
+      const result=await runCalculation<"strokes">({kind:"strokes",project:calculationProject(previewProject),pixels,width,height,mask:aiMask,seed:previewSeed.current},setGenerationProgress,controller.signal);
+      if(controller.signal.aborted)return;
+      priorityPreview.current={width,height,values:result.priority};
+      generatedPreview.current={project:previewProject,revision:generationRevision};
+      setPreviewProgress("Preparing the stroke preview…");
+      setGenerationProgress(null);
+      setGeneratedPlan({plan:result.plan,signature:strokeSignature(previewProject),regionMap:result.regionMap});
       setStrokePreviewError("");
       } catch (error) {
+        if(controller.signal.aborted)return;
+        setGenerationProgress(null);
         setStrokePreviewError(error instanceof Error ? error.message : "Could not generate the stroke preview.");
       }
     };
-    image.onerror = () => setStrokePreviewError("Could not load the source image for the stroke preview.");
+    image.onerror = () => {setGenerationProgress(null);setStrokePreviewError("Could not load the source image for the stroke preview.");};
     image.src = sourceImage.dataUrl;
-    return () => { image.onload = null; image.onerror = null; };
-  }, [activeStep, generationRevision, renderedStrokeProject]);
+    return () => { controller.abort();image.onload = null; image.onerror = null; };
+  }, [activeStep, generationRevision, renderedStrokeProject, aiMask, aiResult?.status, aiResult?.error]);
 
   useEffect(() => {
     const canvas = strokeCanvas.current;
-    if (activeStep !== 2 || !canvas || !generatedPlan ||
+    if(activeStep!==2){setPreviewProgress(null);return;}
+    if (!canvas || !generatedPlan ||
         generatedPlan.signature !== strokeSignature(renderedStrokeProject)) return;
     const previewProject = renderedStrokeProject;
     const previewPalette = previewProject.palette;
@@ -547,6 +554,7 @@ export function App() {
     const plan = generatedPlan.plan;
     setStrokeCount(plan.operations.filter(op => op.type === "stroke").length);
     if (showImportance && priorityPreview.current) {
+      setPreviewProgress(null);
       const { width, height, values } = priorityPreview.current;
       const rgba = new Uint8ClampedArray(width * height * 4);
       for (let i = 0; i < values.length; i++) { const v = values[i]; rgba.set([25 + v * 230, 25 + v * 135, 30 * (1 - v), 255], i * 4); }
@@ -554,6 +562,9 @@ export function App() {
       canvas.getContext("2d")?.putImageData(new ImageData(rgba, width, height), 0, 0);
       const frame = requestAnimationFrame(fitStrokePreview); return () => cancelAnimationFrame(frame);
     }
+    const controller=new AbortController();
+    void (async()=>{
+    setPreviewProgress("Rendering the stroke preview…");
     try {
     let cache = strokePreviewCache.current;
     if (!cache || cache.plan !== plan || cache.project !== previewProject) {
@@ -562,7 +573,7 @@ export function App() {
     }
     const key = showTrajectories ? "trajectories" : "painting";
     if (!cache[key]) {
-      const renderPreview = (showTrajectories: boolean) => {
+      const renderPreview = async (showTrajectories: boolean) => {
       const canvas = document.createElement("canvas");
       const previewWidth = 760;
       canvas.width = previewWidth;
@@ -570,12 +581,9 @@ export function App() {
       const context = canvas.getContext("2d");
       if (!context) return canvas;
       if (!showTrajectories) {
-        const { timeline, origin } = strokePreviewTimeline(plan, previewProject.canvas, previewPalette,
-          previewProject.workspace, previewProject.strokeSettings.paintLoadLengthMm ?? 120, previewProject.brush.widthMm);
-        const rasterWidth = previewAspect >= 1 ? paintPreviewLongestEdge : Math.max(1, Math.round(paintPreviewLongestEdge * previewAspect));
-        const rasterHeight = Math.max(1, Math.round(rasterWidth / previewAspect));
-        const raster = renderPaintTimeline(timeline, previewProject.canvas, previewProject.brush, previewPalette, rasterWidth, rasterHeight,
-          previewProject.strokeSettings.paintSimulation ?? paintSimulationDefaults, previewPalette.find(p => p.skipPainting)?.hex ?? "#eee8da", origin);
+        const raster=await runCalculation<"preview">({kind:"preview",plan,project:calculationProject(previewProject)},setPreviewProgress,controller.signal);
+        if(controller.signal.aborted)return canvas;
+        const rasterWidth=raster.width,rasterHeight=raster.height;
         const layer = document.createElement("canvas"); layer.width = rasterWidth; layer.height = rasterHeight;
         layer.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(raster.rgba), rasterWidth, rasterHeight), 0, 0);
         context.drawImage(layer, 0, 0, canvas.width, canvas.height);
@@ -598,7 +606,9 @@ export function App() {
       }
       return canvas;
       };
-      cache[key] = renderPreview(showTrajectories);
+      const preview=await renderPreview(showTrajectories);
+      if(controller.signal.aborted)return;
+      cache[key]=preview;
     }
     const preview = cache[key]!;
     canvas.width = preview.width;
@@ -609,11 +619,15 @@ export function App() {
         plan.operations.filter((operation) => operation.type === "stroke")
           .length,
       );
-      const frame = requestAnimationFrame(fitStrokePreview);
-      return () => cancelAnimationFrame(frame);
+      setPreviewProgress(null);
+      requestAnimationFrame(()=>{if(!controller.signal.aborted)fitStrokePreview();});
     } catch (error) {
+      if(controller.signal.aborted)return;
+      setPreviewProgress(null);
       setStrokePreviewError(error instanceof Error ? error.message : "Could not render the stroke preview.");
     }
+    })();
+    return ()=>controller.abort();
   }, [activeStep, generatedPlan, renderedStrokeProject, showTrajectories, showImportance]);
 
   useEffect(() => {
@@ -662,7 +676,7 @@ export function App() {
     setProject((current) => ({
       ...current,
       palette: current.palette.map((color) =>
-        color.id === id ? { ...color, ...patch } : color,
+        color.id === id ? { ...color, ...patch, ...(color.autoFaceShade && patch.hex ? {locked:true} : {}) } : color,
       ),
     }));
   const removePaletteColor = (id: string) =>
@@ -672,6 +686,7 @@ export function App() {
         : {
             ...current,
             palette: current.palette.filter((color) => color.id !== id),
+            ...(current.palette.find(color=>color.id===id)?.autoFaceShade && current.posterization.ai ? {posterization:{...current.posterization,ai:{...current.posterization.ai,faceShadeCount:Math.max(0,(current.posterization.ai.faceShadeCount??0)-1)}}} : {}),
           },
     );
   const addPaletteColor = () =>
@@ -811,6 +826,8 @@ export function App() {
   };
 
   const strokePreviewStatus = `${project.strokeSettings.strategy && project.strokeSettings.strategy !== "legacy" ? strategySchemas[project.strokeSettings.strategy].name : project.strokeSettings.style[0].toUpperCase() + project.strokeSettings.style.slice(1)} variation · ${strokeCount} strokes`
+    + (generatedPlan?.plan.coverageStats?.strokes ? ` · ${generatedPlan.plan.coverageStats.strokes} gap fill strokes` : "")
+    + (generatedPlan?.plan.recognitionStats?.strokes ? ` · ${generatedPlan.plan.recognitionStats.strokes} recognition detail strokes` : "")
     + (generatedPlan?.plan.shadowStats ? ` · ${generatedPlan.plan.shadowStats.strokes} shadow strokes` : "")
     + (generatedPlan?.plan.generationStats?.omittedShortStrokes ? ` · ${generatedPlan.plan.generationStats.omittedShortStrokes} strokes below Min omitted` : "")
     + (strokeSignature(project) !== strokeSignature(renderedStrokeProject) ? " · Settings changed — Regenerate" : "");
@@ -1160,18 +1177,25 @@ export function App() {
                   ))}
                 </div>
                 <div className="poster-controls">
+                  <AiPosterizationControls settings={project.posterization}
+                    onChange={settings=>setProject(previous=>({...previous,posterization:settings}))}
+                    analysis={aiResult?.key===aiKey ? {status:aiResult.status,subjects:aiResult.mask?.subjects,details:aiResult.mask?.details,faces:aiResult.mask?.faces,recognitionDetails:aiResult.mask?.recognitionDetails,hairDetails:aiResult.mask?.hairDetails,accessoryDetails:aiResult.mask?.accessoryDetails,error:aiResult.error} : {status:"loading"}}
+                    onRetry={()=>{aiCache.current.delete(aiKey);setAiRetry(value=>value+1);}} />
+                  {project.posterization.method!=="sam3" && <>
                   <label className="trajectory-toggle"><input type="checkbox" checked={project.posterization.medianRadiusMm > 0}
                     onChange={e => setProject(previous => ({ ...previous, posterization: { ...previous.posterization, medianRadiusMm: e.target.checked ? 2 : 0 } }))} /><span>Remove colour speckles · median filter</span></label>
                   {project.posterization.medianRadiusMm > 0 && <label>Median radius · {project.posterization.medianRadiusMm} mm
                     <input type="range" min=".5" max="8" step=".5" value={project.posterization.medianRadiusMm} onChange={e => setProject(previous => ({ ...previous, posterization: { ...previous.posterization, medianRadiusMm: Number(e.target.value) } }))} />
                     <span className="workspace-caption">Merges tiny colour spots before palette mapping and stroke generation. Start at 2 mm; larger values remove fine features. Regenerate strokes after changes.</span>
                   </label>}
+
                   <label>
                     Detail
                     <input
                       type="range"
                       min="1"
                       max="100"
+
                       value={project.posterization.detail}
                       onChange={(event) =>
                         setProject({
@@ -1190,6 +1214,7 @@ export function App() {
                       type="range"
                       min="0"
                       max="100"
+
                       value={project.posterization.smoothing}
                       onChange={(event) =>
                         setProject({
@@ -1202,6 +1227,7 @@ export function App() {
                       }
                     />
                   </label>
+                  </>}
                 </div>
                 <div className="flow-actions">
                   <button
@@ -1210,7 +1236,7 @@ export function App() {
                   >
                     ← Back
                   </button>
-                  <button className="flow-next" onClick={() => goToStep(2)}>
+                  <button className="flow-next" disabled={project.posterization.method==="sam3" && (!aiMask || palettePreviewProject?.palette!==project.palette || palettePreviewProject?.posterization!==project.posterization || palettePreviewProject?.sourceImage!==project.sourceImage || palettePreviewProject?.sourceTransform!==project.sourceTransform || palettePreviewProject?.canvas!==project.canvas)} onClick={() => goToStep(2)}>
                     Continue to Strokes →
                   </button>
                 </div>
@@ -1272,6 +1298,9 @@ export function App() {
                       +
                     </button>
                     <button
+                      type="button"
+                      className="template-action template-action-primary preview-header-action"
+                      disabled={!!strokeProgress}
                       onClick={() => {
                         previewSeed.current = crypto.randomUUID();
                         setRenderedStrokeProject(project);
@@ -1282,6 +1311,7 @@ export function App() {
                     </button>
                   </div>
                 </div>
+                <CalculationProgress stage={strokeProgress} label="Stroke generation and preview"/>
                 {focusEditorActive && <div className="focus-editor-toolbar">
                   <span>Paint focus · drag over the subject</span>
                   <label>Brush size · {Math.round(focusRadius * 200)}%<input aria-label="Focus brush size" type="range" min=".02" max=".3" step=".01" value={focusRadius} onChange={e => setFocusRadius(Number(e.target.value))} /></label>
@@ -1417,11 +1447,12 @@ export function App() {
                 <StrokeTemplatePanel project={project} onChange={setProject} editingFocus={focusEditorActive} onEditFocus={() => { setEditingFocus(value => !value); setShowImportance(false); setShowTrajectories(false); }} />
               </aside>
             </div>
+{generatedPlan && generatedPlan.signature === strokeSignature(renderedStrokeProject) && <StrokeAnalytics plan={generatedPlan.plan} palette={renderedStrokeProject.palette} brushWidth={renderedStrokeProject.brush.widthMm} stale={generatedPlan.signature !== strokeSignature(project)} />}
             <div className="flow-actions">
               <button className="flow-back" onClick={() => setActiveStep(1)}>
                 ← Back
               </button>
-              <button className="flow-next" onClick={() => goToStep(3)}>
+              <button className="flow-next" disabled={!!strokeProgress || (project.posterization.method==="sam3" && (Boolean(strokePreviewError) || generatedPlan?.signature!==strokeSignature(project)))} onClick={() => goToStep(3)}>
                 Continue to Workspace →
               </button>
             </div>
@@ -1431,40 +1462,12 @@ export function App() {
             onChange={workspace => setProject(current => ({ ...current, workspace }))}
             onBack={() => setActiveStep(2)} onNext={() => goToStep(4)} />
         ) : activeStep === 4 ? (
-          <Simulation project={project} onPaintSimulationChange={paintSimulation => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, paintSimulation } }))} onCapacityChange={paintLoadLengthMm => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, paintLoadLengthMm } }))}
+          <Simulation project={project} regionMap={generatedPlan?.regionMap} onPathsCalculated={setMachinePaths} onWorkspaceChange={workspace => setProject(current => ({ ...current, workspace }))} onPaintSimulationChange={paintSimulation => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, paintSimulation } }))} onCapacityChange={paintLoadLengthMm => setProject(current => ({ ...current, strokeSettings: { ...current.strokeSettings, paintLoadLengthMm } }))}
             plan={generatedPlan?.signature === strokeSignature(project) ? generatedPlan.plan : null}
             onBack={() => setActiveStep(3)} onRegenerate={() => goToStep(2)} onNext={() => goToStep(5)} />
         ) : (
-          <section className="planned-step">
-            <p className="eyebrow">
-              Step {String(activeStep + 1).padStart(2, "0")} ·{" "}
-              {steps[activeStep]}
-            </p>
-            <h1>{plannedSteps[activeStep - 2].title}</h1>
-            <p>{plannedSteps[activeStep - 2].description}</p>
-            <div className="planned-card">
-              <span>Coming in the next implementation phase</span>
-              <strong>
-                Your project data is preserved while this tool is being built.
-              </strong>
-            </div>
-            <div className="flow-actions">
-              <button
-                className="flow-back"
-                onClick={() => setActiveStep(activeStep - 1)}
-              >
-                ← Back
-              </button>
-              {activeStep < steps.length - 1 && (
-                <button
-                  className="flow-next"
-                  onClick={() => goToStep(activeStep + 1)}
-                >
-                  Continue →
-                </button>
-              )}
-            </div>
-          </section>
+          <MachineExport project={project} machinePaths={machinePaths} onRecalculate={() => goToStep(4)} plan={generatedPlan?.signature === strokeSignature(project) ? generatedPlan.plan : null}
+            onBack={() => setActiveStep(4)} onWorkspace={() => goToStep(3)} onRegenerate={() => goToStep(2)} />
         )}
         {activeStep === 1 && (
           <section className="restriction-panel">

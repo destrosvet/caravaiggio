@@ -4,3 +4,10 @@ dist/
 src-tauri/target/
 *.log
 artifacts/
+
+# Local Python service cache
+__pycache__/
+*.pyc
+
+# User supplied SAM checkpoint
+tools/sam3/model/*.pt

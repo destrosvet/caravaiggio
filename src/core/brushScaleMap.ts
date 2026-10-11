@@ -18,7 +18,7 @@ export function brushScaleMap(map: ColorRegionMap, canvas: Readonly<{ widthMm: n
     const next = new Uint8Array(pixels);
     for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
       const index = y * width + x, current = pixels[index];
-      if (current >= tables.length) continue; // preserve canvas/transparent masks
+      if (current >= tables.length || map.recognitionMap?.[index]) continue; // preserve canvas/transparent masks
       const left = Math.max(0, x - radiusX), right = Math.min(width, x + radiusX + 1), top = Math.max(0, y - radiusY), bottom = Math.min(height, y + radiusY + 1);
       const counts = tables.map(table => table[bottom * stride + right] - table[top * stride + right] - table[bottom * stride + left] + table[top * stride + left]);
       let best = current;

@@ -1,3 +1,5 @@
+import { MotionDynamicsControls } from "./MotionDynamicsControls.tsx";
+import { defaultMachineSettings } from "../core/machineSettings.ts";
 import { WorkspaceZoneDialog } from "./WorkspaceZoneDialog.tsx";
 import { applyLayoutProfile, captureLayout, loadLayoutProfiles, saveLayoutProfiles, type LayoutProfiles } from "../project/workspaceProfiles.ts";
 import { useMemo, useRef, useState, type PointerEvent } from "react";
@@ -33,6 +35,7 @@ export function WorkspaceEditor({ project, onChange, onBack, onNext }: Props) {
     setGrid(next);
     try { localStorage.setItem(gridStorageKey, JSON.stringify(next)); } catch { /* Keep the current session preference. */ }
   };
+  const machine = workspace.machine ?? defaultMachineSettings;
   const issues = useMemo(() => validateWorkspace(workspace), [workspace]);
   const svg = useRef<SVGSVGElement>(null);
   const drag = useRef<{ id: string; x: number; y: number; startX: number; startY: number; moved?: boolean } | null>(null);
@@ -103,12 +106,23 @@ export function WorkspaceEditor({ project, onChange, onBack, onNext }: Props) {
           {numeric("Height · mm", workspace.height, height => onChange({ ...workspace, height }), 1)}
           {numeric("Safe Z · mm", workspace.safeZ, safeZ => onChange({ ...workspace, safeZ }), 0.1)}
         </div>
+        <p className="eyebrow">XYZ motion settings</p><div className="workspace-fields">
+          {numeric("Canvas travel Z · mm", machine.canvasTravelZ ?? workspace.safeZ, canvasTravelZ => onChange({ ...workspace, machine: { ...machine, canvasTravelZ } }), machine.paintZMax + .1)}
+          {numeric("Machine minimum Z · mm", machine.zMin, zMin => onChange({ ...workspace, machine: { ...machine, zMin } }), -10000)}
+          {numeric("Machine maximum Z · mm", machine.zMax, zMax => onChange({ ...workspace, machine: { ...machine, zMax } }), -10000)}
+          {numeric("Painting minimum Z · mm", machine.paintZMin, paintZMin => onChange({ ...workspace, machine: { ...machine, paintZMin } }), -10000)}
+          {numeric("Painting maximum Z · mm", machine.paintZMax, paintZMax => onChange({ ...workspace, machine: { ...machine, paintZMax } }), -10000)}
+          {numeric("Travel speed · mm/min", machine.travelSpeed, travelSpeed => onChange({ ...workspace, machine: { ...machine, travelSpeed } }), .1)}
+          {numeric("Vertical speed · mm/min", machine.verticalSpeed, verticalSpeed => onChange({ ...workspace, machine: { ...machine, verticalSpeed } }), .1)}
+        </div><p className="workspace-caption">Canvas travel Z applies only to travel wholly inside the canvas; set it above the painted surface and obstacles. Travel to containers uses the highest rim clearance. Double-click a paint, water or wiping zone to configure its XYZ procedure. Positive Z raises the brush. All heights use the same machine Z origin.</p>
+        <label className="simulation-order-toggle"><input type="checkbox" checked={machine.cleanBeforeStart} onChange={event => onChange({ ...workspace, machine: { ...machine, cleanBeforeStart: event.target.checked } })} /> Wash and wipe before first paint load</label>
+        <MotionDynamicsControls value={machine.dynamics} onChange={dynamics=>onChange({...workspace,machine:{...machine,dynamics}})}/>
         <p className="eyebrow">Zones</p><div className="workspace-zone-list">{workspace.zones.map(zone => <button type="button" key={zone.id} className={zone.id === selection ? "selected" : ""} onClick={() => setSelection(zone.id)} onDoubleClick={() => setEditingZone(zone)}>{zone.name}<small>{zone.type} · {zone.x}, {zone.y} mm</small></button>)}</div>
         <button type="button" onClick={() => { const id = crypto.randomUUID(); onChange({ ...workspace, zones: [...workspace.zones, { id, type: "forbidden", name: `Forbidden ${workspace.zones.filter(zone => zone.type === "forbidden").length + 1}`, x: 10, y: workspace.height - 60, width: 50, height: 40 }] }); setSelection(id); }}>+ Forbidden zone</button>
       </aside>
     </div>
-    <div className={`workspace-validation ${issues.length ? "has-issues" : ""}`} role="status"><strong>{issues.length ? `${issues.length} layout issues` : "Layout fits the working area"}</strong>{issues.length ? <ul>{issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul> : <p>No overlaps or zones outside the area. Motion planning and clearance checks follow in the next phase.</p>}</div>
-    {editingZone && <WorkspaceZoneDialog key={editingZone.id} zone={editingZone}
+    <div className={`workspace-validation ${issues.length ? "has-issues" : ""}`} role="status"><strong>{issues.length ? `${issues.length} layout issues` : "Layout fits the working area"}</strong>{issues.length ? <ul>{issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul> : <p>No overlaps or zones outside the area. Container clearance and full motion checks run in Simulation and Export.</p>}</div>
+    {editingZone && <WorkspaceZoneDialog key={editingZone.id} zone={editingZone} safeZ={workspace.safeZ}
       onClose={() => setEditingZone(null)}
       onSave={zone => { patch(zone.id, zone); setEditingZone(null); }}
       onRemove={() => { onChange({ ...workspace, zones: workspace.zones.filter(zone => zone.id !== editingZone.id) }); setSelection("canvas"); setEditingZone(null); }} />}

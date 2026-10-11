@@ -11,7 +11,7 @@
     "demo": "node src/demo.ts",
     "trajectories": "node --experimental-strip-types src/trajectoryLab.ts",
     "test": "node --test test/*.test.ts",
-    "test:ui": "vitest run test/StrokeTemplatePanel.test.tsx test/FocusMaskEditor.test.tsx test/WorkspaceEditor.test.tsx"
+    "test:ui": "vitest run --pool=threads --maxWorkers=1 test/StrokeTemplatePanel.test.tsx test/FocusMaskEditor.test.tsx test/WorkspaceEditor.test.tsx test/MachineExport.test.tsx test/PaintLoadInput.test.tsx test/Simulation.test.tsx test/SimulationViewport.test.tsx test/StrokeAnalytics.test.tsx test/AiPosterizationControls.test.tsx"
   },
   "engines": {
     "node": ">=24"

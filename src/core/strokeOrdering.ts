@@ -27,10 +27,42 @@ function routeLength(strokes: readonly Stroke[], start: Point, end: Point): numb
   for (const stroke of strokes) { length += distance(position, stroke.points[0]); position = stroke.points.at(-1)!; }
   return length + distance(position, end);
 }
+/** Bounded directed Or-opt relocation: improve greedy dead ends without reversing strokes. */
+function refineRoute(input: readonly Stroke[], start: Point, end: Point): Stroke[] {
+  const route = [...input];
+  for (let pass=0;pass<2;pass++) {
+    let improved=false;
+    for (let i=0;i<route.length;i++) {
+      const stroke=route[i],before=i?route[i-1].points.at(-1)!:start,after=i+1<route.length?route[i+1].points[0]:end;
+      const removal=distance(before,after)-distance(before,stroke.points[0])-distance(stroke.points.at(-1)!,after);
+      let best=-2,bestDelta=-1e-6;
+      for(let j=Math.max(-1,i-16);j<Math.min(route.length,i+17);j++) {
+        if(j===i||j===i-1) continue;
+        const from=j<0?start:route[j].points.at(-1)!,to=j+1<route.length?route[j+1].points[0]:end;
+        const delta=removal+distance(from,stroke.points[0])+distance(stroke.points.at(-1)!,to)-distance(from,to);
+        if(delta<bestDelta){bestDelta=delta;best=j;}
+      }
+      if(best!==-2){route.splice(i,1);route.splice((best>i?best-1:best)+1,0,stroke);improved=true;}
+    }
+    if(!improved) break;
+  }
+  return route;
+}
 /** Group paints, then shorten travel without reversing or changing stroke geometry. */
 export function optimizeStrokeOrder(plan: PaintingPlan, workspace: Workspace): PaintingPlan {
-  // Explicit waits/moves are ordering barriers and must remain intact.
+  // Explicit waits/moves are ordering barriers.
   if (plan.operations.some(operation => operation.type !== "stroke")) return plan;
+  if(plan.operations.some(op=>op.type==="stroke" && op.phase==="underpainting") && plan.operations.some(op=>op.type==="stroke" && op.phase!=="underpainting")) {
+    const fill=optimizeStrokeOrder({...plan,operations:plan.operations.filter(op=>op.type==="stroke"&&op.phase==="underpainting")},workspace);
+    const detail=optimizeStrokeOrder({...plan,operations:plan.operations.filter(op=>op.type!=="stroke"||op.phase!=="underpainting")},workspace);
+    return {...plan,operations:[...fill.operations,...detail.operations]};
+  }
+  if (plan.operations.some(operation => operation.type === "stroke" && operation.phase === "recognition") &&
+      plan.operations.some(operation => operation.type === "stroke" && operation.phase !== "recognition")) {
+    const base = optimizeStrokeOrder({ ...plan, operations: plan.operations.filter(op => op.type === "stroke" && op.phase !== "recognition") }, workspace);
+    const details = optimizeStrokeOrder({ ...plan, operations: plan.operations.filter(op => op.type === "stroke" && op.phase === "recognition") }, workspace);
+    return { ...plan, operations: [...base.operations, ...details.operations] };
+  }
   if (plan.operations.some(operation => operation.type === "stroke" && operation.phase === "shadows") &&
       plan.operations.some(operation => operation.type === "stroke" && operation.phase !== "shadows")) {
     const base = optimizeStrokeOrder({ ...plan, operations: plan.operations.filter(op => op.type === "stroke" && op.phase !== "shadows") }, workspace);
@@ -63,7 +95,9 @@ export function optimizeStrokeOrder(plan: PaintingPlan, workspace: Workspace): P
       const node = nearest(root, position); ordered.push(node.stroke); position = node.stroke.points.at(-1)!; node.alive = false;
       let ancestor: Node | undefined = node; while (ancestor) { ancestor.count--; ancestor = ancestor.parent; }
     }
-    result.push(...(routeLength(ordered, start, end) < routeLength(group, start, end) ? ordered : group));
+    const candidate = routeLength(ordered, start, end) < routeLength(group, start, end) ? ordered : group;
+    const refined = refineRoute(candidate, start, end);
+    result.push(...(routeLength(refined, start, end) < routeLength(candidate, start, end) ? refined : candidate));
   }
   return { ...plan, operations: result };
 }

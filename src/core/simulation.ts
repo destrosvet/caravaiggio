@@ -1,7 +1,8 @@
+import { profileProgress, type VelocityProfile } from "./motionDynamics.ts";
 import type { PaintingPlan, Point } from "./model.ts";
 import type { Workspace, WorkspaceZone } from "./workspace.ts";
 import { validateWorkspace } from "./workspace.ts";
-export type SimulationEvent = Readonly<{ type: "move" | "stroke" | "load" | "clean" | "wipe" | "park"; from: Point; to: Point; start: number; end: number; paintId?: string; pressure?: number; loadStart: number; loadEnd: number }>;
+export type SimulationEvent = Readonly<{ type: "move" | "stroke" | "load" | "clean" | "wipe" | "park"; from: Point; to: Point; start: number; end: number; paintId?: string; pressure?: number; loadStart: number; loadEnd: number; velocityProfile?: VelocityProfile }>;
 export type SimulationTimeline = Readonly<{ events: readonly SimulationEvent[]; duration: number; paintDistance: number; travelDistance: number; strokes: number; loads: number; cleans: number; issues: readonly string[] }>;
 const distance = (a: Point, b: Point) => Math.hypot(b.x - a.x, b.y - a.y);
 const centre = (zone: WorkspaceZone): Point => ({ x: zone.x + zone.width / 2, y: zone.y + zone.height / 2 });
@@ -60,7 +61,11 @@ export function buildSimulation(plan: PaintingPlan, workspace: Workspace, capaci
   for (const zone of forbidden) if (events.some(event => segmentIntersectsZone(event.from, event.to, zone, brushWidth / 2))) issues.push(`The brush path crosses forbidden zone ${zone.name}. Move this zone or change the layout.`);
   return { events, duration: elapsed, paintDistance, travelDistance, strokes, loads, cleans, issues };
 }
+export function simulationProgress(event: SimulationEvent, time: number): number {
+  if (event.velocityProfile) return profileProgress(event.velocityProfile, time-event.start);
+  return event.end > event.start ? Math.max(0, Math.min(1, (time - event.start) / (event.end - event.start))) : 1;
+}
 export function simulationPosition(event: SimulationEvent, time: number): Point {
-  const progress = event.end > event.start ? Math.max(0, Math.min(1, (time - event.start) / (event.end - event.start))) : 1;
+  const progress = simulationProgress(event,time);
   return { x: event.from.x + (event.to.x - event.from.x) * progress, y: event.from.y + (event.to.y - event.from.y) * progress };
 }

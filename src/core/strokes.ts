@@ -1,3 +1,5 @@
+import { addCoverageFill } from "./coverageFill.ts";
+import { addRecognitionStrokes } from "./recognitionStrokes.ts";
 import { contourDirectionField, imageContourStrokes } from "./imageContours.ts";
 import { brushScaleMap } from "./brushScaleMap.ts";
 import { joinNearbyStrokes } from "./strokeJoining.ts";
@@ -138,6 +140,7 @@ export const strokeStylePresets: Readonly<
 };
 
 export type ColorRegionMap = Readonly<{
+  fillGaps?: boolean;
   widthPx: number;
   heightPx: number;
   paintIds: readonly string[];
@@ -146,6 +149,7 @@ export type ColorRegionMap = Readonly<{
   palette?: readonly ShadowPaint[];
   sourceRgba?: Uint8ClampedArray;
   priorityMap?: Float32Array;
+  recognitionMap?: Uint8Array;
 }>;
 
 export function generateParallelStrokes(
@@ -288,7 +292,7 @@ function boundaryDistanceField(map: ColorRegionMap): Float32Array {
 export function generateStyledStrokes(
   projectId: string, map: ColorRegionMap, canvas: Readonly<{ widthMm: number; heightMm: number }>, brush: BrushProfile, settings: StrokeGenerationSettings,
 ): PaintingPlan {
-  return addShadowStrokes(generateBaseStrokes(projectId, map, canvas, brush, settings), map, canvas, brush, settings);
+  return addRecognitionStrokes(addShadowStrokes(addCoverageFill(generateBaseStrokes(projectId, map, canvas, brush, settings),map,canvas,brush,settings), map, canvas, brush, settings), map, canvas, brush, settings);
 }
 
 function generateBaseStrokes(

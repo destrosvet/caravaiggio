@@ -1,0 +1,61 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { calculateMotionDynamics, profileProgress } from "../src/core/motionDynamics.ts";
+import { defaultMachineSettings, defaultMotionDynamics } from "../src/core/machineSettings.ts";
+import { buildMachineProgram, machineProgramToGrbl } from "../src/core/machineProgram.ts";
+import { createProject, serializeProject, parseProject } from "../src/project/model.ts";
+import { simulationPosition } from "../src/core/simulation.ts";
+import type { PaintingPlan } from "../src/core/model.ts";
+const settings={...defaultMotionDynamics,enabled:true,maxRate:{x:6000,y:6000,z:6000},acceleration:{x:100,y:100,z:100}};
+const motion=(x0:number,x1:number,speed=6000)=>({from:{x:x0,y:0,z:0},to:{x:x1,y:0,z:0},speed,seconds:Math.abs(x1-x0)/speed*60});
+const close=(a:number,b:number)=>assert.ok(Math.abs(a-b)<1e-8,a+" != "+b);
+test("short moves have triangular ramps, long moves reach cruise; interpolation follows distance",()=>{
+  const short=calculateMotionDynamics([motion(0,10)],settings)[0];
+  close(short.seconds,2*Math.sqrt(10/100));
+  close(profileProgress(short.profile!,short.seconds/4),.125);
+  close(profileProgress(short.profile!,short.seconds/2),.5);
+  close(profileProgress(short.profile!,short.seconds),1);
+  close(profileProgress(short.profile!,-1),0);
+  close(calculateMotionDynamics([motion(0,200)],settings)[0].seconds,3);
+});
+test("collinear segment boundaries do not stop; reversals and G4 dwells do",()=>{
+  const single=calculateMotionDynamics([motion(0,10)],settings)[0].seconds;
+  const split=calculateMotionDynamics([motion(0,2),motion(2,10)],settings);
+  close(split.reduce((sum,m)=>sum+m.seconds,0),single);
+  assert.ok(split[0].profile!.exit>0);close(split[0].profile!.exit,split[1].profile!.entry);
+  const reversal=calculateMotionDynamics([motion(0,10),motion(10,0)],settings);
+  close(reversal[0].profile!.exit,0);close(reversal.reduce((sum,m)=>sum+m.seconds,0),single*2);
+  const dwell={...motion(10,10),seconds:2};
+  const paused=calculateMotionDynamics([motion(0,10),dwell,motion(10,20)],settings);
+  close(paused.reduce((sum,m)=>sum+m.seconds,0),single*2+2);
+});
+test("XYZ component limits constrain diagonal speed and corner tolerance controls slowdown",()=>{
+  const d={...settings,maxRate:{x:600,y:300,z:60},acceleration:{x:20,y:10,z:2}};
+  const diagonal={...motion(0,10),to:{x:10,y:10,z:10}};
+  const result=calculateMotionDynamics([diagonal],d)[0];
+  close(result.speed,60*Math.sqrt(3));
+  close(result.profile!.acceleration,2*Math.sqrt(3));
+  const corner=[motion(0,10),{...motion(10,10),to:{x:10,y:10,z:0}}];
+  const tight=calculateMotionDynamics(corner,{...settings,junctionDeviation:.01});
+  const loose=calculateMotionDynamics(corner,{...settings,junctionDeviation:1});
+  assert.ok(tight[0].profile!.exit<loose[0].profile!.exit);
+  assert.ok(tight.reduce((s,m)=>s+m.seconds,0)>loose.reduce((s,m)=>s+m.seconds,0));
+});
+test("FluidNC dynamics affect shared timeline and exported feeds, persist and reject malformed profiles",()=>{
+  const project=createProject();
+  const plan:PaintingPlan={formatVersion:1,projectId:"test",operations:[{type:"stroke",points:[{x:10,y:20},{x:12,y:20},{x:20,y:20}],paintId:"cadmium-red",pressure:.5,speedMmPerMin:600,expectedLoadStart:1,expectedLoadEnd:0}]};
+  const dynamics={...defaultMotionDynamics,enabled:true,maxRate:{x:120,y:120,z:60},acceleration:{x:2,y:2,z:1}};
+  const workspace={...project.workspace,machine:{...defaultMachineSettings,dynamics}};
+  const actual=buildMachineProgram(plan,workspace,100,6), baseline=buildMachineProgram(plan,project.workspace,100,6);
+  assert.deepEqual(actual.issues,[]);assert.ok(actual.timeline.duration>baseline.timeline.duration);
+  close(actual.motions.reduce((s,m)=>s+m.seconds,0),actual.timeline.duration);
+  assert.equal(actual.timeline.paintDistance,baseline.timeline.paintDistance);
+  assert.equal(actual.timeline.loads,baseline.timeline.loads);
+  for(let i=0;i<actual.motions.length;i++) {const m=actual.motions[i];close(actual.timeline.events[i].end-actual.timeline.events[i].start,m.seconds);for(const axis of ["x","y","z"] as const) {const length=Math.hypot(m.to.x-m.from.x,m.to.y-m.from.y,m.to.z-m.from.z);if(length) assert.ok(m.speed*Math.abs(m.to[axis]-m.from[axis])/length<=dynamics.maxRate[axis]+1e-8);}}
+  const event=actual.timeline.events.find(e=>e.type==="stroke")!;
+  const quarter=simulationPosition(event,event.start+(event.end-event.start)/4);
+  assert.ok(quarter.x>=event.from.x && quarter.x<event.to.x);
+  const code=machineProgramToGrbl(actual,"test");assert.match(code,/FluidNC/);assert.ok(code.includes("acceleration_mm_per_sec2=2/2/1"));assert.ok(!code.includes("$120="));assert.ok(!code.includes("M201"));
+  assert.deepEqual(parseProject(serializeProject({...project,workspace})).workspace.machine?.dynamics,dynamics);
+  for(const bad of [{...dynamics,acceleration:{x:0,y:2,z:1}},{...dynamics,junctionDeviation:0},{enabled:true}]) assert.throws(()=>parseProject(JSON.stringify({...project,workspace:{...workspace,machine:{...defaultMachineSettings,dynamics:bad}}})),/Invalid machine settings/);
+});

@@ -1,8 +1,12 @@
+import { ProcedureEditor } from "./ProcedureEditor.tsx";
+import { defaultProcedure, procedureIssues } from "../core/machineSettings.ts";
 import { useEffect, useRef, useState } from "react";
 import type { WorkspaceZone } from "../core/workspace.ts";
-type Props = { zone: WorkspaceZone; onSave: (zone: WorkspaceZone) => void; onClose: () => void; onRemove: () => void };
-export function WorkspaceZoneDialog({ zone, onSave, onClose, onRemove }: Props) {
+type Props = { zone: WorkspaceZone; safeZ: number; onSave: (zone: WorkspaceZone) => void; onClose: () => void; onRemove: () => void };
+export function WorkspaceZoneDialog({ zone, safeZ, onSave, onClose, onRemove }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const isService = ["paint", "water", "wipe"].includes(zone.type);
+  const [procedure, setProcedure] = useState(() => zone.procedure ?? defaultProcedure(zone.type, safeZ));
   const [name, setName] = useState(zone.name);
   const [values, setValues] = useState(() => ({ x: String(zone.x), y: String(zone.y), width: String(zone.width), height: String(zone.height) }));
   useEffect(() => {
@@ -21,7 +25,8 @@ export function WorkspaceZoneDialog({ zone, onSave, onClose, onRemove }: Props) 
       event.preventDefault();
       const next = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, Number(value)])) as { x: number; y: number; width: number; height: number };
       if (!name.trim() || Object.values(next).some(value => !Number.isFinite(value))) return;
-      onSave({ ...zone, ...next, name: name.trim() });
+      if (isService && procedureIssues(procedure).length) return;
+      onSave({ ...zone, ...next, name: name.trim(), ...(isService ? { procedure } : {}) });
     }}>
       <header className="picker-header"><h2 id="zone-dialog-title">{zone.name} · Parameters</h2><button type="button" aria-label="Close zone parameters" onClick={onClose}>×</button></header>
       <p className="workspace-caption">Positions and dimensions in millimetres. X/Y refer to the top-left corner.</p>
@@ -33,9 +38,10 @@ export function WorkspaceZoneDialog({ zone, onSave, onClose, onRemove }: Props) 
         </label>)}
       </div>
       {zone.type === "canvas" && <p className="workspace-caption">Canvas dimensions follow Image settings.</p>}
+      {isService && <ProcedureEditor value={procedure} type={zone.type} safeZ={safeZ} onChange={setProcedure} />}
       <footer className="picker-footer">
         {zone.type === "forbidden" && <button type="button" className="zone-remove-button" onClick={onRemove}>Remove zone</button>}
-        <button type="button" onClick={onClose}>Cancel</button><button type="submit" className="flow-next">Save</button>
+        <button type="button" onClick={onClose}>Cancel</button><button type="submit" disabled={isService && !!procedureIssues(procedure).length} className="flow-next">Save</button>
       </footer>
     </form>
   </dialog>;

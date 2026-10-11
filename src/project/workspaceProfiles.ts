@@ -24,7 +24,7 @@ export function saveLayoutProfiles(profiles: LayoutProfiles): void {
   localStorage.setItem(KEY, JSON.stringify(validated));
 }
 export function applyLayoutProfile(profile: MachineLayoutProfile, project: CaravaiggioProject): Workspace {
-  const slots = profile.workspace.paintSlots ?? profile.workspace.zones.filter(zone => zone.type === "paint").map(({ x, y, width, height }) => ({ x, y, width, height }));
+  const slots = profile.workspace.paintSlots ?? profile.workspace.zones.filter(zone => zone.type === "paint").map(({ x, y, width, height, procedure }) => ({ x, y, width, height, ...(procedure ? { procedure } : {}) }));
   return syncWorkspace({ ...profile.workspace, paintSlots: slots, zones: profile.workspace.zones.filter(zone => zone.type !== "paint") }, project.canvas, project.palette);
 }
 export function createProjectWithDefaultLayout(): CaravaiggioProject {
@@ -36,6 +36,6 @@ export function createProjectWithDefaultLayout(): CaravaiggioProject {
   } catch { return project; }
 }
 export function captureLayout(workspace: Workspace): Workspace {
-  const slots = workspace.zones.filter(zone => zone.type === "paint").map(({ x, y, width, height }) => ({ x, y, width, height }));
+  const slots = workspace.zones.filter(zone => zone.type === "paint").map(({ x, y, width, height, procedure }) => ({ x, y, width, height, ...(procedure ? { procedure } : {}) }));
   return { ...workspace, paintSlots: [...slots, ...(workspace.paintSlots?.slice(slots.length) ?? [])] };
 }

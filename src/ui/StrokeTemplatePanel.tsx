@@ -11,7 +11,7 @@ import { priorityDefaults, priorityParameters } from "../core/priority.ts";
 
 export function PaintSimulationControls({ settings, onChange }: { settings: StrokeGenerationSettings; onChange: (settings: StrokeGenerationSettings) => void }) {
   const simulation = settings.paintSimulation ?? paintSimulationDefaults;
-  return <details><summary>Wet paint simulation · Mixbox pigments</summary><p className="workspace-caption">Preview estimates pigment blending and colour carried by the brush. These controls do not change machine trajectories.</p>
+  return <details className="paint-simulation-controls"><summary>Wet paint simulation · Mixbox pigments</summary><p className="workspace-caption">Preview estimates pigment blending and colour carried by the brush. These controls do not change machine trajectories.</p>
     {paintSimulationParameters.map(p => <label key={p.key}>{p.label} · {simulation[p.key]}
       <input type="range" min={p.min} max={p.max} step={p.step} value={simulation[p.key]} onChange={e => onChange({ ...settings, paintSimulation: { ...simulation, [p.key]: Number(e.target.value) } })} />
     </label>)}
